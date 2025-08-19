@@ -195,6 +195,17 @@ static double parse_rate_gbps(const char *rate) {
     return v;
 }
 
+static void format_scale_label(double v_disp_per_s, units_t units, char *buf, size_t buflen) {
+    // v_disp_per_s is already in chosen display units (bits or bytes per second)
+    const char *suffixes_bits[] = {"b/s","Kb/s","Mb/s","Gb/s","Tb/s","Pb/s"};
+    const char *suffixes_bytes[] = {"B/s","KB/s","MB/s","GB/s","TB/s","PB/s"};
+    double v = v_disp_per_s;
+    int idx = 0;
+    while (v >= 1000.0 && idx < 5) { v /= 1000.0; idx++; }
+    const char *suf = (units == UNITS_BITS) ? suffixes_bits[idx] : suffixes_bytes[idx];
+    snprintf(buf, buflen, "%6.2f %s", v, suf);
+}
+
 static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, double cur_pps,
                            double *hist, int hist_len, units_t units, double rate_gbps,
                            bool use_colors)
@@ -230,31 +241,50 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
         double link_bps = rate_gbps * 1e9;
         if (link_bps > 0 && link_bps < maxv) maxv = link_bps;
     }
-    char topbuf[32], midbuf[32];
-    snprintf(topbuf, sizeof(topbuf), "%6.2f %s", maxv/1e9, (units==UNITS_BITS)?"Gb/s":"GB/s");
-    snprintf(midbuf, sizeof(midbuf), "%6.2f %s", (maxv/2.0)/1e9, (units==UNITS_BITS)?"Gb/s":"GB/s");
+    // dynamic labels with appropriate units
+    char topbuf[32], midbuf[32], botbuf[32];
+    format_scale_label(maxv, units, topbuf, sizeof(topbuf));
+    format_scale_label(maxv/2.0, units, midbuf, sizeof(midbuf));
+    snprintf(botbuf, sizeof(botbuf), "%s", (units == UNITS_BITS) ? "0.00 b/s" : "0.00 B/s");
+    int lblw = (int)strlen(topbuf);
+    if ((int)strlen(midbuf) > lblw) lblw = (int)strlen(midbuf);
+    if ((int)strlen(botbuf) > lblw) lblw = (int)strlen(botbuf);
+    y_label_w = lblw + 3; // 1 space padding + '|' + margin
+    chart_w = wx - 2 - y_label_w;
+    if (chart_w < 1) chart_w = 1;
+    // y-axis with right-aligned labels
     mvwprintw(win, 1, 1, "%*s |", y_label_w-3, topbuf);
     mvwprintw(win, 1 + chart_h/2, 1, "%*s |", y_label_w-3, midbuf);
-    mvwprintw(win, 1 + chart_h - 1, 1, "%*s |", y_label_w-3, "0.00 ");
+    mvwprintw(win, 1 + chart_h - 1, 1, "%*s |", y_label_w-3, botbuf);
 
+    // fill empty region with '.' then draw bars
+    for (int x = 0; x < samples; ++x) {
+        int col = y_label_w + 1 + x;
+        for (int yy = 0; yy < chart_h; ++yy) {
+            int y = 1 + (chart_h - 1 - yy);
+            mvwaddch(win, y, col, '.');
+        }
+    }
     for (int x = 0; x < samples; ++x) {
         double v = hist[hist_len - samples + x];
         if (units == UNITS_BITS) v *= 8.0;
         int h = (int)llround((v / maxv) * chart_h);
         if (h < 0) h = 0; if (h > chart_h) h = chart_h;
         int col = y_label_w + 1 + x;
-        for (int yy = 0; yy < chart_h; ++yy) {
+        for (int yy = 0; yy < h; ++yy) {
             int y = 1 + (chart_h - 1 - yy);
-            bool on = (yy < h);
-            if (on) {
-                if (use_colors) wattron(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
-                mvwaddch(win, y, col, ACS_CKBOARD);
-                if (use_colors) wattroff(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
-            }
+            if (use_colors) wattron(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
+            mvwaddch(win, y, col, '|');
+            if (use_colors) wattroff(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
         }
     }
+    // baseline and x-axis label
     for (int x = 0; x < samples; ++x) mvwaddch(win, 1 + chart_h, y_label_w + 1 + x, '_');
-    mvwprintw(win, wy-1, wx-18, (title && title[0]=='R')? "Bars:* Cyan" : "Bars:+ Red");
+    const char *xt = "time";
+    int xt_col = y_label_w + 1 + samples - (int)strlen(xt);
+    if (xt_col < y_label_w + 1) xt_col = y_label_w + 1;
+    mvwprintw(win, 1 + chart_h, xt_col, "%s", xt);
+    mvwprintw(win, wy-1, wx-18, (title && title[0]=='R')? "Bars:| Cyan" : "Bars:| Red");
     if (use_colors) wattroff(win, COLOR_PAIR(10));
     wnoutrefresh(win);
 }

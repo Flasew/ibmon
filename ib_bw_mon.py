@@ -372,33 +372,66 @@ def draw(screen, args):
                 link_bps = rate_gbps * 1e9
                 if link_bps > 0 and link_bps < maxv:
                     maxv = link_bps
-            top_label = f"{maxv/1e9:6.2f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
-            mid_label = f"{(maxv/2)/1e9:6.2f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
+            # dynamic labels with appropriate units and right alignment
+            def fmt_label(val):
+                v = val
+                if args.units == 'bits':
+                    suffix = ['b/s','Kb/s','Mb/s','Gb/s','Tb/s','Pb/s']
+                else:
+                    suffix = ['B/s','KB/s','MB/s','GB/s','TB/s','PB/s']
+                idx = 0
+                while v >= 1000.0 and idx < len(suffix)-1:
+                    v /= 1000.0
+                    idx += 1
+                return f"{v:6.2f} {suffix[idx]}"
+            top_label = fmt_label(maxv)
+            mid_label = fmt_label(maxv/2)
+            bot_label = '0.00 b/s' if args.units == 'bits' else '0.00 B/s'
+            lblw = max(len(top_label), len(mid_label), len(bot_label))
+            y_label_w = lblw + 3
+            chart_w = wx - 2 - y_label_w
+            if chart_w < 1:
+                chart_w = 1
             try:
                 win.addstr(1, 1, f"{top_label:>{y_label_w-3}} |")
                 win.addstr(1 + chart_h//2, 1, f"{mid_label:>{y_label_w-3}} |")
-                win.addstr(1 + chart_h - 1, 1, f"{'0.00 ':>{y_label_w-3}} |")
+                win.addstr(1 + chart_h - 1, 1, f"{bot_label:>{y_label_w-3}} |")
             except curses.error:
                 pass
+            # fill dots
+            for x in range(samples):
+                col = y_label_w + 1 + x
+                for yy in range(chart_h):
+                    y = 1 + (chart_h - 1 - yy)
+                    try:
+                        win.addch(y, col, ord('.'))
+                    except curses.error:
+                        pass
+            # draw bars
             for x in range(samples):
                 v = scaled(data_list[-samples + x])
                 h = int(round((v / maxv) * chart_h))
                 h = max(0, min(chart_h, h))
                 col = y_label_w + 1 + x
-                for yy in range(chart_h):
+                for yy in range(h):
                     y = 1 + (chart_h - 1 - yy)
-                    if yy < h:
-                        try:
-                            if has_colors:
-                                win.attron(curses.color_pair(1 if is_rx else 2))
-                            win.addch(y, col, curses.ACS_CKBOARD)
-                            if has_colors:
-                                win.attroff(curses.color_pair(1 if is_rx else 2))
-                        except curses.error:
-                            pass
+                    try:
+                        if has_colors:
+                            win.attron(curses.color_pair(1 if is_rx else 2))
+                        win.addch(y, col, ord('|'))
+                        if has_colors:
+                            win.attroff(curses.color_pair(1 if is_rx else 2))
+                    except curses.error:
+                        pass
             try:
                 for x in range(samples):
                     win.addch(1 + chart_h, y_label_w + 1 + x, ord('_'))
+                # x-axis label
+                xt = 'time'
+                xcol = y_label_w + 1 + samples - len(xt)
+                if xcol < y_label_w + 1:
+                    xcol = y_label_w + 1
+                win.addstr(1 + chart_h, xcol, xt)
             except curses.error:
                 pass
             if has_colors:
