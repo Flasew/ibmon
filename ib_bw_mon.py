@@ -171,6 +171,19 @@ def draw(screen, args):
     curses.use_default_colors()
     screen.nodelay(True)
     screen.timeout(0)
+    has_colors = curses.has_colors()
+    if has_colors:
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+        except Exception:
+            pass
+        curses.init_pair(1, curses.COLOR_CYAN, -1)      # RX bars
+        curses.init_pair(2, curses.COLOR_RED, -1)       # TX bars
+        curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_BLACK)  # light text
+        curses.init_pair(11, curses.COLOR_BLACK, curses.COLOR_BLACK)  # panel bg
+        curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_BLACK)  # header bg
+        curses.init_pair(13, curses.COLOR_WHITE, curses.COLOR_BLACK)  # border
 
     try:
         paths, link_layer, rate = resolve_counters(args.device, args.port)
@@ -208,6 +221,13 @@ def draw(screen, args):
     # history for plotting (store recent samples)
     rx_hist: Deque[float] = deque(maxlen=4096)
     tx_hist: Deque[float] = deque(maxlen=4096)
+
+    # windows
+    win_hdr = None
+    win_rx = None
+    win_tx = None
+
+    start_time = time.perf_counter()
 
     while True:
         start_loop = time.perf_counter()
@@ -253,109 +273,145 @@ def draw(screen, args):
                 except Exception:
                     pass
 
-        # Rendering
-        screen.erase()
-        title = f"InfiniBand Bandwidth Monitor — {args.device} port {args.port}  [q:quit p:pause u:units]"
-        screen.addstr(0, 0, title)
-        screen.addstr(1, 0, f"Interval: {args.interval*1000:.0f} ms   Units: {args.units}")
-        if link_layer:
-            screen.addstr(2, 0, f"Link: {link_layer}")
-        if rate:
-            screen.addstr(2, 20, f"Rate: {rate}")
-
-        row = 4
-        screen.addstr(row, 0, "Direction     Data Rate            Packets/s")
-        row += 1
-
-        if paused:
-            screen.addstr(row, 0, "PAUSED")
-        else:
-            screen.addstr(row + 0, 0, f"RX           {human_rate(rx_Bps, args.units):>18}    {human_pps(rx_pps):>12}")
-            screen.addstr(row + 1, 0, f"TX           {human_rate(tx_Bps, args.units):>18}    {human_pps(tx_pps):>12}")
-
-            if rate_gbps is not None:
-                # Utilization using bits/s
-                rx_util = min(100.0, (rx_Bps * 8.0) / (rate_gbps * 1e9) * 100.0)
-                tx_util = min(100.0, (tx_Bps * 8.0) / (rate_gbps * 1e9) * 100.0)
-                screen.addstr(row + 2, 0, f"Utilization  RX: {rx_util:6.2f}%   TX: {tx_util:6.2f}%")
-
-        # Draw bmon-like bar graph
+        # Layout windows
         maxy, maxx = screen.getmaxyx()
-        chart_top = row + 4
-        chart_height = maxy - chart_top - 1
-        y_label_w = 10
-        chart_width = maxx - 2 - y_label_w
-        if chart_height > 3 and chart_width > 10 and len(rx_hist) > 1:
-            samples = min(chart_width, len(rx_hist))
-            def scaled(v):
-                return v * 8.0 if args.units == "bits" else v
-            maxv = 1.0
-            rx_list = list(rx_hist)
-            tx_list = list(tx_hist)
-            for i in range(samples):
-                r = scaled(rx_list[-samples + i])
-                t = scaled(tx_list[-samples + i])
-                if r > maxv:
-                    maxv = r
-                if t > maxv:
-                    maxv = t
-            rate_gbps = parse_rate_gbps(rate)
-            if args.units == "bits" and rate_gbps is not None and rate_gbps > 0:
-                link_bps = rate_gbps * 1e9
-                if link_bps < maxv:
-                    maxv = link_bps
+        hdr_h = 4
+        remaining = maxy - hdr_h
+        if remaining < 6:
+            remaining = 6
+        rx_h = remaining // 2
+        tx_h = remaining - rx_h
 
-            # Y labels top/mid/bottom
-            top_label = f"{maxv/1e9:5.1f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
-            mid_label = f"{(maxv/2)/1e9:5.1f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
-            bot_label = f"{0.0:5.1f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
+        if win_hdr is None or win_rx is None or win_tx is None:
+            win_hdr = curses.newwin(hdr_h, maxx, 0, 0)
+            win_rx = curses.newwin(rx_h, maxx, hdr_h, 0)
+            win_tx = curses.newwin(tx_h, maxx, hdr_h + rx_h, 0)
+        else:
+            # Recreate if size changed
+            ch, cw = win_hdr.getmaxyx()
+            if ch != hdr_h or cw != maxx:
+                win_hdr = curses.newwin(hdr_h, maxx, 0, 0)
+            ch, cw = win_rx.getmaxyx()
+            if ch != rx_h or cw != maxx:
+                win_rx = curses.newwin(rx_h, maxx, hdr_h, 0)
+            ch, cw = win_tx.getmaxyx()
+            if ch != tx_h or cw != maxx:
+                win_tx = curses.newwin(tx_h, maxx, hdr_h + rx_h, 0)
+
+        # Header
+        win_hdr.erase()
+        try:
+            win_hdr.bkgd(' ', curses.color_pair(12))
+            win_hdr.attron(curses.color_pair(13))
+            win_hdr.box()
+            win_hdr.attroff(curses.color_pair(13))
+        except curses.error:
+            pass
+        try:
+            win_hdr.attron(curses.color_pair(10))
+            win_hdr.addstr(0, 2, " InfiniBand Bandwidth Monitor ")
+            win_hdr.addstr(1, 2, f"{args.device} port {args.port}  [q:quit p:pause u:units]")
+            win_hdr.addstr(2, 2, f"Interval: {args.interval*1000:.0f} ms   Units: {args.units}")
+            if link_layer:
+                win_hdr.addstr(1, maxx//2, f"Link: {link_layer}")
+            if rate:
+                win_hdr.addstr(2, maxx//2, f"Rate: {rate}")
+            if paused:
+                win_hdr.addstr(1, maxx-12, "[PAUSED]")
+            win_hdr.attroff(curses.color_pair(10))
+        except curses.error:
+            pass
+        win_hdr.noutrefresh()
+
+        def draw_panel(win, is_rx: bool, cur_Bps: float, cur_pps: float, hist_deque: Deque[float]):
+            wy, wx = win.getmaxyx()
             try:
-                screen.addstr(chart_top, 0, f"{top_label:>{y_label_w-2}} |")
-                screen.addstr(chart_top + chart_height//2, 0, f"{mid_label:>{y_label_w-2}} |")
-                screen.addstr(chart_top + chart_height - 1, 0, f"{bot_label:>{y_label_w-2}} |")
+                win.erase()
+                if has_colors:
+                    win.bkgd(' ', curses.color_pair(11))
+                    win.attron(curses.color_pair(13))
+                win.box()
+                if has_colors:
+                    win.attroff(curses.color_pair(13))
             except curses.error:
                 pass
-
-            # Bars
+            # title and current values
+            try:
+                if has_colors:
+                    win.attron(curses.color_pair(10))
+                win.addstr(0, 2, f" {'RX' if is_rx else 'TX'}  {human_rate(cur_Bps, args.units)}  {human_pps(cur_pps)} ")
+            except curses.error:
+                pass
+            y_label_w = 12
+            chart_h = wy - 3
+            chart_w = wx - 2 - y_label_w
+            if chart_h < 3 or chart_w < 10 or len(hist_deque) < 2:
+                win.noutrefresh()
+                return
+            samples = min(chart_w, len(hist_deque))
+            data_list = list(hist_deque)
+            def scaled(v):
+                return v * 8.0 if args.units == 'bits' else v
+            maxv = 1.0
+            for i in range(samples):
+                v = scaled(data_list[-samples + i])
+                if v > maxv:
+                    maxv = v
+            rate_gbps = parse_rate_gbps(rate)
+            if args.units == 'bits' and rate_gbps:
+                link_bps = rate_gbps * 1e9
+                if link_bps > 0 and link_bps < maxv:
+                    maxv = link_bps
+            top_label = f"{maxv/1e9:6.2f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
+            mid_label = f"{(maxv/2)/1e9:6.2f} {'Gb/s' if args.units=='bits' else 'GB/s'}"
+            try:
+                win.addstr(1, 1, f"{top_label:>{y_label_w-3}} |")
+                win.addstr(1 + chart_h//2, 1, f"{mid_label:>{y_label_w-3}} |")
+                win.addstr(1 + chart_h - 1, 1, f"{'0.00 ':>{y_label_w-3}} |")
+            except curses.error:
+                pass
             for x in range(samples):
-                r = scaled(rx_list[-samples + x])
-                t = scaled(tx_list[-samples + x])
-                rh = int(round((r / maxv) * chart_height))
-                th = int(round((t / maxv) * chart_height))
-                rh = max(0, min(chart_height, rh))
-                th = max(0, min(chart_height, th))
+                v = scaled(data_list[-samples + x])
+                h = int(round((v / maxv) * chart_h))
+                h = max(0, min(chart_h, h))
                 col = y_label_w + 1 + x
-                for yy in range(chart_height):
-                    y = chart_top + (chart_height - 1 - yy)
-                    ch = ord(' ')
-                    rx_on = yy < rh
-                    tx_on = yy < th
-                    if rx_on and tx_on:
-                        ch = ord('#')
-                    elif rx_on:
-                        ch = ord('*')
-                    elif tx_on:
-                        ch = ord('+')
-                    try:
-                        screen.addch(y, col, ch)
-                    except curses.error:
-                        pass
-
-            # baseline and legend
+                for yy in range(chart_h):
+                    y = 1 + (chart_h - 1 - yy)
+                    if yy < h:
+                        try:
+                            if has_colors:
+                                win.attron(curses.color_pair(1 if is_rx else 2))
+                            win.addch(y, col, curses.ACS_CKBOARD)
+                            if has_colors:
+                                win.attroff(curses.color_pair(1 if is_rx else 2))
+                        except curses.error:
+                            pass
             try:
                 for x in range(samples):
-                    screen.addch(chart_top + chart_height, y_label_w + 1 + x, ord('-'))
-                screen.addstr(chart_top + chart_height, maxx - 22, "*RX  +TX  #Both")
+                    win.addch(1 + chart_h, y_label_w + 1 + x, ord('-'))
             except curses.error:
                 pass
+            if has_colors:
+                try:
+                    win.attroff(curses.color_pair(10))
+                except curses.error:
+                    pass
+            win.noutrefresh()
 
-        screen.refresh()
+        # Draw panels
+        draw_panel(win_rx, True, rx_Bps, rx_pps, rx_hist)
+        draw_panel(win_tx, False, tx_Bps, tx_pps, tx_hist)
+
+        curses.doupdate()
 
         # Sleep remaining time to maintain interval
         elapsed = time.perf_counter() - start_loop
         to_sleep = args.interval - elapsed
         if to_sleep > 0:
             time.sleep(to_sleep)
+
+        if args.duration and args.duration > 0 and (time.perf_counter() - start_time) >= args.duration:
+            break
 
 
 def main():
@@ -369,7 +425,7 @@ def main():
         "-i",
         "--interval",
         type=float,
-        default=0.2,
+        default=1.0,
         help="Refresh interval in seconds (supports sub-second)",
     )
     parser.add_argument(
@@ -382,6 +438,7 @@ def main():
     parser.add_argument("--csv", help="CSV output path (logs bytes/sec and pps)")
     parser.add_argument("--csv-append", action="store_true", help="Append to CSV if exists")
     parser.add_argument("--csv-headers", action="store_true", help="Write CSV header row")
+    parser.add_argument("--duration", type=float, default=0.0, help="Auto-exit after N seconds (0 = infinite)")
     args = parser.parse_args()
 
     if args.interval <= 0:

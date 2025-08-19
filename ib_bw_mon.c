@@ -39,10 +39,13 @@ typedef struct {
     const char *csv_path;
     bool csv_append;
     bool csv_headers;
+    double duration; // seconds, 0 = infinite
 } opts_t;
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_sigint(int sig) { (void)sig; g_stop = 1; }
+static volatile sig_atomic_t g_resized = 0;
+static void on_sigwinch(int sig) { (void)sig; g_resized = 1; }
 
 static char *path_join3(const char *a, const char *b, const char *c) {
     size_t la = strlen(a), lb = strlen(b), lc = strlen(c);
@@ -192,9 +195,73 @@ static double parse_rate_gbps(const char *rate) {
     return v;
 }
 
+static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, double cur_pps,
+                           double *hist, int hist_len, units_t units, double rate_gbps,
+                           bool use_colors)
+{
+    int wy, wx; getmaxyx(win, wy, wx);
+    werase(win);
+    if (use_colors) wbkgd(win, COLOR_PAIR(11));
+    if (use_colors) wattron(win, COLOR_PAIR(13));
+    box(win, 0, 0);
+    if (use_colors) wattroff(win, COLOR_PAIR(13));
+    char ratebuf[64], ppsbuf[64];
+    human_rate(cur_Bps, units, ratebuf, sizeof(ratebuf));
+    human_pps(cur_pps, ppsbuf, sizeof(ppsbuf));
+    if (use_colors) wattron(win, COLOR_PAIR(10));
+    mvwprintw(win, 0, 2, " %s  %s  %s ", title ? title : "", ratebuf, ppsbuf);
+
+    int y_label_w = 12;
+    int chart_h = wy - 3;
+    int chart_w = wx - 2 - y_label_w;
+    if (chart_h < 3 || chart_w < 10 || hist_len < 2) {
+        wnoutrefresh(win);
+        return;
+    }
+    int samples = chart_w;
+    if (samples > hist_len) samples = hist_len;
+    double maxv = 1.0;
+    for (int i = 0; i < samples; ++i) {
+        double v = hist[hist_len - samples + i];
+        if (units == UNITS_BITS) v *= 8.0;
+        if (v > maxv) maxv = v;
+    }
+    if (units == UNITS_BITS && rate_gbps > 0) {
+        double link_bps = rate_gbps * 1e9;
+        if (link_bps > 0 && link_bps < maxv) maxv = link_bps;
+    }
+    char topbuf[32], midbuf[32];
+    snprintf(topbuf, sizeof(topbuf), "%6.2f %s", maxv/1e9, (units==UNITS_BITS)?"Gb/s":"GB/s");
+    snprintf(midbuf, sizeof(midbuf), "%6.2f %s", (maxv/2.0)/1e9, (units==UNITS_BITS)?"Gb/s":"GB/s");
+    mvwprintw(win, 1, 1, "%*s |", y_label_w-3, topbuf);
+    mvwprintw(win, 1 + chart_h/2, 1, "%*s |", y_label_w-3, midbuf);
+    mvwprintw(win, 1 + chart_h - 1, 1, "%*s |", y_label_w-3, "0.00 ");
+
+    for (int x = 0; x < samples; ++x) {
+        double v = hist[hist_len - samples + x];
+        if (units == UNITS_BITS) v *= 8.0;
+        int h = (int)llround((v / maxv) * chart_h);
+        if (h < 0) h = 0; if (h > chart_h) h = chart_h;
+        int col = y_label_w + 1 + x;
+        for (int yy = 0; yy < chart_h; ++yy) {
+            int y = 1 + (chart_h - 1 - yy);
+            bool on = (yy < h);
+            if (on) {
+                if (use_colors) wattron(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
+                mvwaddch(win, y, col, ACS_CKBOARD);
+                if (use_colors) wattroff(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
+            }
+        }
+    }
+    for (int x = 0; x < samples; ++x) mvwaddch(win, 1 + chart_h, y_label_w + 1 + x, '-');
+    mvwprintw(win, wy-1, wx-18, (title && title[0]=='R')? "Bars:* Cyan" : "Bars:+ Red");
+    if (use_colors) wattroff(win, COLOR_PAIR(10));
+    wnoutrefresh(win);
+}
+
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s -d DEVICE [-p PORT] [-i INTERVAL] [-u bits|bytes] [--csv PATH] [--csv-append] [--csv-headers]\n"
+        "Usage: %s -d DEVICE [-p PORT] [-i INTERVAL] [-u bits|bytes] [--csv PATH] [--csv-append] [--csv-headers] [--duration SECONDS]\n"
         "\n"
         "Monitor InfiniBand bandwidth and packets via sysfs.\n",
         prog);
@@ -203,7 +270,7 @@ static void usage(const char *prog) {
 int main(int argc, char **argv) {
     opts_t opt = {0};
     opt.port = 1;
-    opt.interval = 0.2;
+    opt.interval = 1.0;
     opt.units = UNITS_BITS;
 
     static struct option long_opts[] = {
@@ -214,6 +281,7 @@ int main(int argc, char **argv) {
         {"csv", required_argument, 0, 1000},
         {"csv-append", no_argument, 0, 1001},
         {"csv-headers", no_argument, 0, 1002},
+        {"duration", required_argument, 0, 1003},
         {0,0,0,0}
     };
     int c;
@@ -230,6 +298,7 @@ int main(int argc, char **argv) {
             case 1000: opt.csv_path = optarg; break;
             case 1001: opt.csv_append = true; break;
             case 1002: opt.csv_headers = true; break;
+            case 1003: opt.duration = atof(optarg); break;
             default: usage(argv[0]); return 2;
         }
     }
@@ -239,6 +308,7 @@ int main(int argc, char **argv) {
     if (opt.interval <= 0) { fprintf(stderr, "--interval must be > 0\n"); return 2; }
 
     signal(SIGINT, on_sigint);
+    signal(SIGWINCH, on_sigwinch);
 
     counters_t ctrs;
     if (!resolve_counters(opt.device, opt.port, &ctrs)) {
@@ -267,6 +337,18 @@ int main(int argc, char **argv) {
     keypad(stdscr, TRUE);
     curs_set(0);
     timeout(0);
+    bool use_colors = false;
+    if (has_colors()) {
+        start_color();
+        use_colors = true;
+        use_default_colors();
+        init_pair(1, COLOR_CYAN, -1);               // RX bars
+        init_pair(2, COLOR_RED, -1);                // TX bars
+        init_pair(10, COLOR_WHITE, COLOR_BLACK);    // light text on dark bg
+        init_pair(11, COLOR_BLACK, COLOR_BLACK);    // panel bg
+        init_pair(12, COLOR_BLACK, COLOR_BLACK);    // header bg
+        init_pair(13, COLOR_WHITE, COLOR_BLACK);    // borders
+    }
 
     bool paused = false;
     double rate_gbps = parse_rate_gbps(ctrs.rate);
@@ -289,8 +371,20 @@ int main(int argc, char **argv) {
     static double tx_hist[HIST_CAP];
     int hist_len = 0; // number of valid samples
 
+    // windows
+    WINDOW *win_hdr = NULL, *win_rx = NULL, *win_tx = NULL;
+    int prev_maxy = -1, prev_maxx = -1;
+
+    double start_time = now_monotonic();
     for (; !g_stop; ) {
         double loop_start = now_monotonic();
+
+        if (g_resized) {
+            g_resized = 0;
+            endwin();
+            refresh();
+            prev_maxy = -1; prev_maxx = -1; // force window recreate
+        }
 
         int ch = getch();
         if (ch != ERR) {
@@ -341,108 +435,49 @@ int main(int argc, char **argv) {
             }
         }
 
-        erase();
-        mvprintw(0, 0, "InfiniBand Bandwidth Monitor — %s port %d  [q:quit p:pause u:units]",
-                 opt.device, opt.port);
-        mvprintw(1, 0, "Interval: %.0f ms   Units: %s", opt.interval*1000.0,
-                 (opt.units == UNITS_BITS) ? "bits" : "bytes");
-        if (ctrs.link_layer) mvprintw(2, 0, "Link: %s", ctrs.link_layer);
-        if (ctrs.rate) mvprintw(2, 20, "Rate: %s", ctrs.rate);
-
-        int row = 4;
-        mvprintw(row, 0, "Direction     Data Rate            Packets/s");
-        row++;
-
-        if (paused) {
-            mvprintw(row, 0, "PAUSED");
-        } else {
-            char buf1[64], buf2[64];
-            mvprintw(row+0, 0, "RX           %18s    %12s",
-                     human_rate(rx_Bps, opt.units, buf1, sizeof(buf1)),
-                     human_pps(rx_pps, buf2, sizeof(buf2)));
-            mvprintw(row+1, 0, "TX           %18s    %12s",
-                     human_rate(tx_Bps, opt.units, buf1, sizeof(buf1)),
-                     human_pps(tx_pps, buf2, sizeof(buf2)));
-
-            if (rate_gbps > 0.0) {
-                double rx_util = (rx_Bps * 8.0) / (rate_gbps * 1e9) * 100.0;
-                double tx_util = (tx_Bps * 8.0) / (rate_gbps * 1e9) * 100.0;
-                if (rx_util < 0) rx_util = 0; if (rx_util > 100) rx_util = 100;
-                if (tx_util < 0) tx_util = 0; if (tx_util > 100) tx_util = 100;
-                mvprintw(row+2, 0, "Utilization  RX: %6.2f%%   TX: %6.2f%%", rx_util, tx_util);
-            }
-        }
-
-        // Draw bmon-like bar graph below metrics
+        // Layout: header + two stacked windows: RX then TX
         int maxy, maxx; getmaxyx(stdscr, maxy, maxx);
-        int chart_top = row + 4;
-        int chart_height = maxy - chart_top - 1;
-        int y_label_w = 10;
-        if (y_label_w < 0) y_label_w = 0;
-        int chart_width = maxx - 2 - y_label_w; // 1 col margin left/right
-        if (chart_height > 3 && chart_width > 10 && hist_len > 1) {
-            // compute max value to scale (based on selected units)
-            double maxv = 1.0;
-            int samples_to_draw = chart_width;
-            if (samples_to_draw > hist_len) samples_to_draw = hist_len;
-            for (int i = 0; i < samples_to_draw; ++i) {
-                double rxv = rx_hist[hist_len - samples_to_draw + i];
-                double txv = tx_hist[hist_len - samples_to_draw + i];
-                double rxd = (opt.units == UNITS_BITS) ? rxv*8.0 : rxv;
-                double txd = (opt.units == UNITS_BITS) ? txv*8.0 : txv;
-                if (rxd > maxv) maxv = rxd;
-                if (txd > maxv) maxv = txd;
-            }
-            if (opt.units == UNITS_BITS && rate_gbps > 0) {
-                double link_bps = rate_gbps * 1e9;
-                if (link_bps > 0 && link_bps < maxv) maxv = link_bps;
-            }
+        int hdr_h = 4;
+        int remaining = maxy - hdr_h;
+        if (remaining < 6) remaining = 6;
+        int rx_h = remaining / 2;
+        int tx_h = remaining - rx_h;
 
-            // scale labels (top/mid/bottom)
-            char topbuf[32], midbuf[32], botbuf[32];
-            snprintf(topbuf, sizeof(topbuf), "%5.1f %s", maxv/1e9, (opt.units==UNITS_BITS)?"Gb/s":"GB/s");
-            snprintf(midbuf, sizeof(midbuf), "%5.1f %s", (maxv/2.0)/1e9, (opt.units==UNITS_BITS)?"Gb/s":"GB/s");
-            snprintf(botbuf, sizeof(botbuf), "%5.1f %s", 0.0, (opt.units==UNITS_BITS)?"Gb/s":"GB/s");
-            mvprintw(chart_top, 0, "%*s |", y_label_w-2, topbuf);
-            mvprintw(chart_top + chart_height/2, 0, "%*s |", y_label_w-2, midbuf);
-            mvprintw(chart_top + chart_height - 1, 0, "%*s |", y_label_w-2, botbuf);
-
-            // colors
-            bool use_colors = has_colors();
-            if (use_colors) { start_color(); init_pair(1, COLOR_CYAN, -1); init_pair(2, COLOR_RED, -1); init_pair(3, COLOR_WHITE, -1);}            
-
-            // draw bars
-            for (int x = 0; x < samples_to_draw; ++x) {
-                double rxv = rx_hist[hist_len - samples_to_draw + x];
-                double txv = tx_hist[hist_len - samples_to_draw + x];
-                double rxd = (opt.units == UNITS_BITS) ? rxv*8.0 : rxv;
-                double txd = (opt.units == UNITS_BITS) ? txv*8.0 : txv;
-                int rh = (int)llround((rxd / maxv) * (chart_height));
-                int th = (int)llround((txd / maxv) * (chart_height));
-                if (rh < 0) rh = 0; if (rh > chart_height) rh = chart_height;
-                if (th < 0) th = 0; if (th > chart_height) th = chart_height;
-                int col = y_label_w + 1 + x;
-                for (int yy = 0; yy < chart_height; ++yy) {
-                    int y = chart_top + (chart_height - 1 - yy);
-                    char ch = ' ';
-                    short color = 0;
-                    bool rx_on = (yy < rh);
-                    bool tx_on = (yy < th);
-                    if (rx_on && tx_on) { ch = '#'; color = 3; }
-                    else if (rx_on) { ch = '*'; color = 1; }
-                    else if (tx_on) { ch = '+'; color = 2; }
-                    if (use_colors && color) attron(COLOR_PAIR(color));
-                    mvaddch(y, col, ch);
-                    if (use_colors && color) attroff(COLOR_PAIR(color));
-                }
-            }
-
-            // x-axis baseline
-            for (int x = 0; x < samples_to_draw; ++x) mvaddch(chart_top + chart_height, y_label_w + 1 + x, '-');
-            mvprintw(chart_top + chart_height, maxx - 20, "*RX  +TX  #Both");
+        // recreate windows if size changed
+        if (maxy != prev_maxy || maxx != prev_maxx || !win_hdr || !win_rx || !win_tx) {
+            if (win_hdr) { delwin(win_hdr); win_hdr = NULL; }
+            if (win_rx) { delwin(win_rx); win_rx = NULL; }
+            if (win_tx) { delwin(win_tx); win_tx = NULL; }
+            win_hdr = newwin(hdr_h, maxx, 0, 0);
+            win_rx = newwin(rx_h, maxx, hdr_h, 0);
+            win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0);
+            prev_maxy = maxy; prev_maxx = maxx;
         }
 
-        refresh();
+        // Header window
+        werase(win_hdr);
+        if (use_colors) wbkgd(win_hdr, COLOR_PAIR(12));
+        if (use_colors) wattron(win_hdr, COLOR_PAIR(13));
+        box(win_hdr, 0, 0);
+        if (use_colors) wattroff(win_hdr, COLOR_PAIR(13));
+        if (use_colors) wattron(win_hdr, COLOR_PAIR(10));
+        mvwprintw(win_hdr, 0, 2, " InfiniBand Bandwidth Monitor ");
+        mvwprintw(win_hdr, 1, 2, "%s port %d  [q:quit p:pause u:units]",
+                  opt.device, opt.port);
+        mvwprintw(win_hdr, 2, 2, "Interval: %.0f ms   Units: %s",
+                  opt.interval*1000.0, (opt.units == UNITS_BITS) ? "bits" : "bytes");
+        if (ctrs.link_layer) mvwprintw(win_hdr, 1, maxx/2, "Link: %s", ctrs.link_layer);
+        if (ctrs.rate) mvwprintw(win_hdr, 2, maxx/2, "Rate: %s", ctrs.rate);
+        if (paused) mvwprintw(win_hdr, 1, maxx-12, "[PAUSED]");
+        if (use_colors) wattroff(win_hdr, COLOR_PAIR(10));
+        wnoutrefresh(win_hdr);
+
+        // Draw RX panel
+        draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors);
+        // Draw TX panel
+        draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors);
+
+        doupdate();
 
         // sleep remaining time
         double elapsed = now_monotonic() - loop_start;
@@ -453,8 +488,15 @@ int main(int argc, char **argv) {
             ts.tv_nsec = (long)((to_sleep - ts.tv_sec) * 1e9);
             nanosleep(&ts, NULL);
         }
+
+        if (opt.duration > 0 && (now_monotonic() - start_time) >= opt.duration) {
+            break;
+        }
     }
 
+    if (win_hdr) delwin(win_hdr);
+    if (win_rx) delwin(win_rx);
+    if (win_tx) delwin(win_tx);
     endwin();
     if (csv) fclose(csv);
     free_counters(&ctrs);

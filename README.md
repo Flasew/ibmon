@@ -28,13 +28,13 @@ If your system requires wide curses, use: `make LIBS=-lncursesw`.
 ## Usage (C)
 
 ```
-./ib_bw_mon -d mlx5_0 [-p 1] [-i 0.1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers]
+./ib_bw_mon -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 ## Usage (Python)
 
 ```
-python3 ib_bw_mon.py -d mlx5_0 [-p 1] [-i 0.1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers]
+python3 ib_bw_mon.py -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 Arguments:
@@ -49,6 +49,7 @@ Keys in TUI:
 - `q`: quit
 - `p`: pause/resume sampling
 - `u`: toggle units between bits/s and bytes/s
+ - `--duration N`: auto-exit after N seconds (useful for quick tests)
 
 ## Notes
 
@@ -56,3 +57,4 @@ Keys in TUI:
 - Counters are assumed to be 64-bit and wrap-around is handled.
 - If expected counter files are missing, the tool reports which ones are absent.
 - CSV logs are bytes/sec for bandwidth (consistent across units) and packets/sec.
+ - TUI layout: header + two colored panels (RX on blue, TX on magenta) with per-panel history graphs.
