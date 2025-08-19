@@ -16,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+#include <inttypes.h>
 
 #define SYSFS_IB_BASE "/sys/class/infiniband"
 
@@ -27,6 +28,18 @@ typedef struct {
     bool data_is_words; // true if data counters are 4-byte words
     char *link_layer;
     char *rate;
+    // optional counters
+    char *tx_discards;
+    char *tx_wait;
+    char *rx_errors;
+    char *rx_remote_phy_err;
+    char *rx_switch_relay_err;
+    char *local_phy_errors;
+    char *symbol_error;
+    char *link_error_recovery;
+    char *link_downed;
+    char *vl15_dropped;
+    char *excessive_buf_overrun;
 } counters_t;
 
 typedef enum { UNITS_BITS, UNITS_BYTES } units_t;
@@ -146,6 +159,31 @@ static bool resolve_counters(const char *device, int port, counters_t *c) {
     if (c->tx_data && strstr(c->tx_data, "port_xmit_data")) c->data_is_words = true;
     if (c->rx_data && strstr(c->rx_data, "port_rcv_data")) c->data_is_words = true;
 
+    // Optional counters
+    const char *tx_discards_candidates[] = { "port_xmit_discards", NULL };
+    const char *tx_wait_candidates[] = { "port_xmit_wait", NULL };
+    const char *rx_errors_candidates[] = { "port_rcv_errors", NULL };
+    const char *rx_remote_phy_candidates[] = { "port_rcv_remote_physical_errors", NULL };
+    const char *rx_switch_relay_candidates[] = { "port_rcv_switch_relay_errors", NULL };
+    const char *local_phy_err_candidates[] = { "port_local_phy_errors", "port_local_physical_errors", NULL };
+    const char *symbol_error_candidates[] = { "symbol_error", "symbol_errors", NULL };
+    const char *link_err_recovery_candidates[] = { "link_error_recovery", NULL };
+    const char *link_downed_candidates[] = { "link_downed", NULL };
+    const char *vl15_candidates[] = { "VL15_dropped", "vl15_dropped", NULL };
+    const char *excessive_buf_overrun_candidates[] = { "excessive_buffer_overrun_errors", NULL };
+
+    c->tx_discards = first_existing(counters_base, tx_discards_candidates);
+    c->tx_wait = first_existing(counters_base, tx_wait_candidates);
+    c->rx_errors = first_existing(counters_base, rx_errors_candidates);
+    c->rx_remote_phy_err = first_existing(counters_base, rx_remote_phy_candidates);
+    c->rx_switch_relay_err = first_existing(counters_base, rx_switch_relay_candidates);
+    c->local_phy_errors = first_existing(counters_base, local_phy_err_candidates);
+    c->symbol_error = first_existing(counters_base, symbol_error_candidates);
+    c->link_error_recovery = first_existing(counters_base, link_err_recovery_candidates);
+    c->link_downed = first_existing(counters_base, link_downed_candidates);
+    c->vl15_dropped = first_existing(counters_base, vl15_candidates);
+    c->excessive_buf_overrun = first_existing(counters_base, excessive_buf_overrun_candidates);
+
     free(port_base);
     free(counters_base);
 
@@ -156,6 +194,10 @@ static void free_counters(counters_t *c) {
     if (!c) return;
     free(c->tx_data); free(c->rx_data); free(c->tx_pkts); free(c->rx_pkts);
     free(c->link_layer); free(c->rate);
+    free(c->tx_discards); free(c->tx_wait); free(c->rx_errors); free(c->rx_remote_phy_err);
+    free(c->rx_switch_relay_err); free(c->local_phy_errors); free(c->symbol_error);
+    free(c->link_error_recovery); free(c->link_downed); free(c->vl15_dropped);
+    free(c->excessive_buf_overrun);
 }
 
 static double now_monotonic(void) {
@@ -386,9 +428,11 @@ int main(int argc, char **argv) {
     }
 
     bool paused = false;
+    bool data_mode = false; // 'd' toggles data page
     double rate_gbps = parse_rate_gbps(ctrs.rate);
 
     uint64_t p_txB=0, p_rxB=0, p_txp=0, p_rxp=0;
+    uint64_t raw_tx_data=0, raw_rx_data=0, raw_tx_pkts=0, raw_rx_pkts=0;
     if (!read_u64_file(ctrs.tx_data, &p_txB) ||
         !read_u64_file(ctrs.rx_data, &p_rxB) ||
         !read_u64_file(ctrs.tx_pkts, &p_txp) ||
@@ -398,6 +442,7 @@ int main(int argc, char **argv) {
         free_counters(&ctrs);
         return 1;
     }
+    raw_tx_data = p_txB; raw_rx_data = p_rxB; raw_tx_pkts = p_txp; raw_rx_pkts = p_rxp;
     double prev_t = now_monotonic();
 
     // history for graph
@@ -422,14 +467,16 @@ int main(int argc, char **argv) {
         }
 
         int ch = getch();
+        bool fast_switch = false;
         if (ch != ERR) {
             if (ch == 'q' || ch == 'Q') break;
             else if (ch == 'p' || ch == 'P') paused = !paused;
             else if (ch == 'u' || ch == 'U') opt.units = (opt.units == UNITS_BITS) ? UNITS_BYTES : UNITS_BITS;
+            else if (ch == 'd' || ch == 'D') { data_mode = !data_mode; fast_switch = true; }
         }
 
         static double tx_Bps=0, rx_Bps=0, tx_pps=0, rx_pps=0;
-        if (!paused) {
+        if (!paused && !fast_switch) {
             uint64_t c_txB=0, c_rxB=0, c_txp=0, c_rxp=0;
             bool ok = read_u64_file(ctrs.tx_data, &c_txB)
                    && read_u64_file(ctrs.rx_data, &c_rxB)
@@ -448,6 +495,7 @@ int main(int argc, char **argv) {
                 tx_pps = (double)d_txp / dt; rx_pps = (double)d_rxp / dt;
 
                 p_txB = c_txB; p_rxB = c_rxB; p_txp = c_txp; p_rxp = c_rxp; prev_t = now;
+                raw_tx_data = c_txB; raw_rx_data = c_rxB; raw_tx_pkts = c_txp; raw_rx_pkts = c_rxp;
             }
 
             // append to history regardless so the graph scrolls
@@ -497,14 +545,14 @@ int main(int argc, char **argv) {
         if (use_colors) wattron(win_hdr, COLOR_PAIR(10));
         // Title and current time on same line
         mvwprintw(win_hdr, 0, 2, " InfiniBand Bandwidth Monitor ");
-        // Time: MMMM-YY-DD HH:MM:SS
+        // Time: MonthName-DD-YYYY HH:MM:SS
         {
             time_t t = time(NULL);
             struct tm lt; localtime_r(&t, &lt);
             char tbuf[64];
-            strftime(tbuf, sizeof(tbuf), "%B-%y-%d %H:%M:%S", &lt);
-            int maxx_hdr, maxy_hdr; getmaxyx(win_hdr, maxy_hdr, maxx_hdr);
-            int col = maxx_hdr - (int)strlen(tbuf) - 2; if (col < 2) col = 2;
+            strftime(tbuf, sizeof(tbuf), "%B-%d-%Y %H:%M:%S", &lt);
+            int rows_hdr, cols_hdr; getmaxyx(win_hdr, rows_hdr, cols_hdr);
+            int col = cols_hdr - (int)strlen(tbuf) - 2; if (col < 2) col = 2;
             mvwprintw(win_hdr, 0, col, "%s", tbuf);
         }
         mvwprintw(win_hdr, 1, 2, "%s port %d  [q:quit p:pause u:units]",
@@ -514,19 +562,109 @@ int main(int argc, char **argv) {
         if (ctrs.link_layer) mvwprintw(win_hdr, 1, maxx/2, "Link: %s", ctrs.link_layer);
         if (ctrs.rate) mvwprintw(win_hdr, 2, maxx/2, "Rate: %s", ctrs.rate);
         if (paused) mvwprintw(win_hdr, 1, maxx-12, "[PAUSED]");
+        if (data_mode) mvwprintw(win_hdr, 0, 32, "[DATA]");
         if (use_colors) wattroff(win_hdr, COLOR_PAIR(10));
         wnoutrefresh(win_hdr);
 
-        // Draw RX panel
-        draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors);
-        // Draw TX panel
-        draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors);
+        if (!data_mode) {
+            // Draw RX/TX graph panels
+            draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors);
+            draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors);
+        } else {
+            // Draw raw counters panels
+            // Adjust layout to 3 panels in data mode
+            int maxy2, maxx2; getmaxyx(stdscr, maxy2, maxx2);
+            int hdr_h2 = 4;
+            int remaining2 = maxy2 - hdr_h2;
+            if (remaining2 < 9) remaining2 = 9;
+            int each = remaining2 / 3;
+            int rx_h2 = each;
+            int tx_h2 = each;
+            int other_h2 = remaining2 - rx_h2 - tx_h2;
+            // Recreate windows for data mode layout
+            if (win_rx) { delwin(win_rx); win_rx = NULL; }
+            if (win_tx) { delwin(win_tx); win_tx = NULL; }
+            WINDOW *win_other = newwin(other_h2, maxx2, hdr_h2 + rx_h2 + tx_h2, 0);
+            win_rx = newwin(rx_h2, maxx2, hdr_h2, 0);
+            win_tx = newwin(tx_h2, maxx2, hdr_h2 + rx_h2, 0);
+
+            // RX panel
+            werase(win_rx);
+            if (use_colors) {
+                wbkgd(win_rx, COLOR_PAIR(11));
+                wattron(win_rx, COLOR_PAIR(13));
+            }
+            box(win_rx, 0, 0);
+            if (use_colors) {
+                wattroff(win_rx, COLOR_PAIR(13));
+                wattron(win_rx, COLOR_PAIR(10));
+            }
+            mvwprintw(win_rx, 0, 2, " RX Raw Counters ");
+            mvwprintw(win_rx, 1, 2, "port_rcv_data:    %20" PRIu64 " %s", raw_rx_data, ctrs.data_is_words ? "(words)" : "" );
+            mvwprintw(win_rx, 2, 2, "port_rcv_packets: %20" PRIu64, raw_rx_pkts);
+            if (ctrs.rx_errors) {
+                uint64_t v; if (read_u64_file(ctrs.rx_errors, &v)) mvwprintw(win_rx, 3, 2, "port_rcv_errors: %20" PRIu64, v);
+            }
+            if (ctrs.rx_remote_phy_err) {
+                uint64_t v; if (read_u64_file(ctrs.rx_remote_phy_err, &v)) mvwprintw(win_rx, 4, 2, "rcv_remote_phy:   %20" PRIu64, v);
+            }
+            if (ctrs.rx_switch_relay_err) {
+                uint64_t v; if (read_u64_file(ctrs.rx_switch_relay_err, &v)) mvwprintw(win_rx, 5, 2, "rcv_switch_relay: %20" PRIu64, v);
+            }
+            if (use_colors) wattroff(win_rx, COLOR_PAIR(10));
+            wnoutrefresh(win_rx);
+
+            // TX panel
+            werase(win_tx);
+            if (use_colors) {
+                wbkgd(win_tx, COLOR_PAIR(11));
+                wattron(win_tx, COLOR_PAIR(13));
+            }
+            box(win_tx, 0, 0);
+            if (use_colors) {
+                wattroff(win_tx, COLOR_PAIR(13));
+                wattron(win_tx, COLOR_PAIR(10));
+            }
+            mvwprintw(win_tx, 0, 2, " TX Raw Counters ");
+            mvwprintw(win_tx, 1, 2, "port_xmit_data:   %20" PRIu64 " %s", raw_tx_data, ctrs.data_is_words ? "(words)" : "" );
+            mvwprintw(win_tx, 2, 2, "port_xmit_packets:%20" PRIu64, raw_tx_pkts);
+            if (ctrs.tx_discards) {
+                uint64_t v; if (read_u64_file(ctrs.tx_discards, &v)) mvwprintw(win_tx, 3, 2, "xmit_discards:    %20" PRIu64, v);
+            }
+            if (ctrs.tx_wait) {
+                uint64_t v; if (read_u64_file(ctrs.tx_wait, &v)) mvwprintw(win_tx, 4, 2, "xmit_wait:        %20" PRIu64, v);
+            }
+            if (use_colors) wattroff(win_tx, COLOR_PAIR(10));
+            wnoutrefresh(win_tx);
+
+            // OTHER panel
+            werase(win_other);
+            if (use_colors) {
+                wbkgd(win_other, COLOR_PAIR(11));
+                wattron(win_other, COLOR_PAIR(13));
+            }
+            box(win_other, 0, 0);
+            if (use_colors) {
+                wattroff(win_other, COLOR_PAIR(13));
+                wattron(win_other, COLOR_PAIR(10));
+            }
+            mvwprintw(win_other, 0, 2, " Other Counters ");
+            int rowo = 1;
+            if (ctrs.local_phy_errors) { uint64_t v; if (read_u64_file(ctrs.local_phy_errors, &v)) { mvwprintw(win_other, rowo++, 2, "local_phy_errors: %20" PRIu64, v);} }
+            if (ctrs.symbol_error) { uint64_t v; if (read_u64_file(ctrs.symbol_error, &v)) { mvwprintw(win_other, rowo++, 2, "symbol_error:     %20" PRIu64, v);} }
+            if (ctrs.link_error_recovery) { uint64_t v; if (read_u64_file(ctrs.link_error_recovery, &v)) { mvwprintw(win_other, rowo++, 2, "link_err_recov:   %20" PRIu64, v);} }
+            if (ctrs.link_downed) { uint64_t v; if (read_u64_file(ctrs.link_downed, &v)) { mvwprintw(win_other, rowo++, 2, "link_downed:      %20" PRIu64, v);} }
+            if (ctrs.vl15_dropped) { uint64_t v; if (read_u64_file(ctrs.vl15_dropped, &v)) { mvwprintw(win_other, rowo++, 2, "vl15_dropped:     %20" PRIu64, v);} }
+            if (ctrs.excessive_buf_overrun) { uint64_t v; if (read_u64_file(ctrs.excessive_buf_overrun, &v)) { mvwprintw(win_other, rowo++, 2, "excess_buf_over:  %20" PRIu64, v);} }
+            if (use_colors) wattroff(win_other, COLOR_PAIR(10));
+            wnoutrefresh(win_other);
+        }
 
         doupdate();
 
         // sleep remaining time
         double elapsed = now_monotonic() - loop_start;
-        double to_sleep = opt.interval - elapsed;
+        double to_sleep = fast_switch ? 0.0 : (opt.interval - elapsed);
         if (to_sleep > 0) {
             struct timespec ts;
             ts.tv_sec = (time_t)to_sleep;
