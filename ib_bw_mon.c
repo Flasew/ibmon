@@ -253,7 +253,7 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
             }
         }
     }
-    for (int x = 0; x < samples; ++x) mvwaddch(win, 1 + chart_h, y_label_w + 1 + x, '-');
+    for (int x = 0; x < samples; ++x) mvwaddch(win, 1 + chart_h, y_label_w + 1 + x, '_');
     mvwprintw(win, wy-1, wx-18, (title && title[0]=='R')? "Bars:* Cyan" : "Bars:+ Red");
     if (use_colors) wattroff(win, COLOR_PAIR(10));
     wnoutrefresh(win);
@@ -413,25 +413,24 @@ int main(int argc, char **argv) {
                 tx_pps = (double)d_txp / dt; rx_pps = (double)d_rxp / dt;
 
                 p_txB = c_txB; p_rxB = c_rxB; p_txp = c_txp; p_rxp = c_rxp; prev_t = now;
+            }
 
-                // append to history
-                if (hist_len < HIST_CAP) {
-                    rx_hist[hist_len] = rx_Bps;
-                    tx_hist[hist_len] = tx_Bps;
-                    hist_len++;
-                } else {
-                    // shift left (cheap and simple; acceptable for small caps)
-                    memmove(rx_hist, rx_hist+1, sizeof(double)*(HIST_CAP-1));
-                    memmove(tx_hist, tx_hist+1, sizeof(double)*(HIST_CAP-1));
-                    rx_hist[HIST_CAP-1] = rx_Bps;
-                    tx_hist[HIST_CAP-1] = tx_Bps;
-                }
+            // append to history regardless so the graph scrolls
+            if (hist_len < HIST_CAP) {
+                rx_hist[hist_len] = rx_Bps;
+                tx_hist[hist_len] = tx_Bps;
+                hist_len++;
+            } else {
+                memmove(rx_hist, rx_hist+1, sizeof(double)*(HIST_CAP-1));
+                memmove(tx_hist, tx_hist+1, sizeof(double)*(HIST_CAP-1));
+                rx_hist[HIST_CAP-1] = rx_Bps;
+                tx_hist[HIST_CAP-1] = tx_Bps;
+            }
 
-                // CSV log in bytes per second
-                if (csv) {
-                    fprintf(csv, "%.6f,%.0f,%.0f,%.0f,%.0f\n", now, rx_Bps, tx_Bps, rx_pps, tx_pps);
-                    fflush(csv);
-                }
+            // CSV log in bytes per second (even if same values)
+            if (csv) {
+                fprintf(csv, "%.6f,%.0f,%.0f,%.0f,%.0f\n", now, rx_Bps, tx_Bps, rx_pps, tx_pps);
+                fflush(csv);
             }
         }
 
@@ -461,7 +460,18 @@ int main(int argc, char **argv) {
         box(win_hdr, 0, 0);
         if (use_colors) wattroff(win_hdr, COLOR_PAIR(13));
         if (use_colors) wattron(win_hdr, COLOR_PAIR(10));
+        // Title and current time on same line
         mvwprintw(win_hdr, 0, 2, " InfiniBand Bandwidth Monitor ");
+        // Time: MMMM-YY-DD HH:MM:SS
+        {
+            time_t t = time(NULL);
+            struct tm lt; localtime_r(&t, &lt);
+            char tbuf[64];
+            strftime(tbuf, sizeof(tbuf), "%B-%y-%d %H:%M:%S", &lt);
+            int maxx_hdr, maxy_hdr; getmaxyx(win_hdr, maxy_hdr, maxx_hdr);
+            int col = maxx_hdr - (int)strlen(tbuf) - 2; if (col < 2) col = 2;
+            mvwprintw(win_hdr, 0, col, "%s", tbuf);
+        }
         mvwprintw(win_hdr, 1, 2, "%s port %d  [q:quit p:pause u:units]",
                   opt.device, opt.port);
         mvwprintw(win_hdr, 2, 2, "Interval: %.0f ms   Units: %s",

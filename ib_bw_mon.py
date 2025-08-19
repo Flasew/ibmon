@@ -243,25 +243,29 @@ def draw(screen, args):
                 args.units = "bytes" if args.units == "bits" else "bits"
 
         if not paused:
-            cur = read_counters(paths)
-            now = time.perf_counter()
-            dt = max(1e-9, now - prev_t)
-            d_txB, d_rxB, d_txp, d_rxp = diff_counters(prev, cur)
+            try:
+                cur = read_counters(paths)
+                now = time.perf_counter()
+                dt = max(1e-9, now - prev_t)
+                d_txB, d_rxB, d_txp, d_rxp = diff_counters(prev, cur)
 
-            # IB data counters are in 4-byte words; convert to bytes if IB
-            if is_ib:
-                d_txB *= 4
-                d_rxB *= 4
+                if is_ib:
+                    d_txB *= 4
+                    d_rxB *= 4
 
-            tx_Bps = d_txB / dt
-            rx_Bps = d_rxB / dt
-            tx_pps = d_txp / dt
-            rx_pps = d_rxp / dt
+                tx_Bps = d_txB / dt
+                rx_Bps = d_rxB / dt
+                tx_pps = d_txp / dt
+                rx_pps = d_rxp / dt
 
-            prev = cur
-            prev_t = now
+                prev = cur
+                prev_t = now
+            except Exception:
+                now = time.perf_counter()
+                # keep previous values if read fails
+                pass
 
-            # update history
+            # always append to history so the graph scrolls
             rx_hist.append(rx_Bps)
             tx_hist.append(tx_Bps)
 
@@ -310,6 +314,12 @@ def draw(screen, args):
         try:
             win_hdr.attron(curses.color_pair(10))
             win_hdr.addstr(0, 2, " InfiniBand Bandwidth Monitor ")
+            # Current time top-right: MMMM-YY-DD HH:MM:SS
+            now_str = time.strftime("%B-%y-%d %H:%M:%S", time.localtime())
+            try:
+                win_hdr.addstr(0, maxx - len(now_str) - 2, now_str)
+            except curses.error:
+                pass
             win_hdr.addstr(1, 2, f"{args.device} port {args.port}  [q:quit p:pause u:units]")
             win_hdr.addstr(2, 2, f"Interval: {args.interval*1000:.0f} ms   Units: {args.units}")
             if link_layer:
@@ -388,7 +398,7 @@ def draw(screen, args):
                             pass
             try:
                 for x in range(samples):
-                    win.addch(1 + chart_h, y_label_w + 1 + x, ord('-'))
+                    win.addch(1 + chart_h, y_label_w + 1 + x, ord('_'))
             except curses.error:
                 pass
             if has_colors:
