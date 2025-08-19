@@ -640,7 +640,7 @@ int main(int argc, char **argv) {
             struct tm lt; localtime_r(&t, &lt);
             char tbuf[64];
             strftime(tbuf, sizeof(tbuf), "%B-%d-%Y %H:%M:%S", &lt);
-            int rows_hdr, cols_hdr; getmaxyx(win_hdr, rows_hdr, cols_hdr);
+            int cols_hdr = getmaxx(win_hdr);
             int col = cols_hdr - (int)strlen(tbuf) - 2; if (col < 2) col = 2;
             mvwprintw(win_hdr, 0, col, "%s", tbuf);
         }

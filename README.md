@@ -1,6 +1,10 @@
 # ib_bw_mon
 
-Lightweight TUI tools (C and Python) to monitor InfiniBand bandwidth and packet rates via sysfs.
+InfiniBand bandwidth and packet monitor with a fast, curses-based TUI.
+
+Two implementations are provided:
+- `ib_bw_mon` (C, ncurses): high-performance TUI with plotting, raw counters, and info pages
+- `ib_bw_mon.py` (Python, curses): lightweight TUI with plotting and CSV logging
 
 ## Features
 
@@ -13,8 +17,8 @@ Lightweight TUI tools (C and Python) to monitor InfiniBand bandwidth and packet 
 
 ## Requirements
 
-- For C binary: a C compiler and `ncurses` development libraries.
-- For Python script: Python 3 (standard library only).
+- C: a C compiler and `ncurses` development headers.
+- Python: Python 3 (standard library only).
 - Access to InfiniBand sysfs counters.
 
 ## Build (C)
@@ -28,13 +32,13 @@ If your system requires wide curses, use: `make LIBS=-lncursesw`.
 ## Usage (C)
 
 ```
-./ib_bw_mon -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--bg black|terminal] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
+./ib_bw_mon -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--bg black|terminal] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 ## Usage (Python)
 
 ```
-python3 ib_bw_mon.py -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
+python3 ib_bw_mon.py -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 Arguments:
@@ -44,18 +48,42 @@ Arguments:
 - `-i, --interval`: Refresh interval in seconds (default: 0.2)
 - `-u, --units`: Show bandwidth in `bits` or `bytes` per second (default: `bits`)
 
-Keys in TUI:
+## Controls
 
 - `q`: quit
 - `p`: pause/resume sampling
 - `u`: toggle units between bits/s and bytes/s
- - `--bg`: choose `terminal` to use your terminal’s background or `black` (default: terminal on some terminals may look better)
- - `--duration N`: auto-exit after N seconds (useful for quick tests)
+- `d` (C): toggle Data page showing raw counters (plot keeps updating)
+- `i` (C): toggle Info page showing GIDs and attributes
+- `--bg`: choose `terminal` to use your terminal’s background or `black`
+- `--duration N`: auto-exit after N seconds (useful for quick tests)
 
-## Notes
+## Features
 
-- On InfiniBand, `port_xmit_data`/`port_rcv_data` are in 4-byte words; the tools convert to bytes automatically when `link_layer` is `InfiniBand`.
-- Counters are assumed to be 64-bit and wrap-around is handled.
-- If expected counter files are missing, the tool reports which ones are absent.
-- CSV logs are bytes/sec for bandwidth (consistent across units) and packets/sec.
- - TUI layout: header + two colored panels (RX on blue, TX on magenta) with per-panel history graphs.
+- Plot view (C and Python):
+  - Right-anchored history graphs for RX/TX bandwidth.
+  - Dots (empty) and bars (occupied) bmon-like style.
+  - Y-axis scales auto-adjust with appropriate units (b/s, Kb/s, Mb/s, … or B/s, KB/s, …).
+  - Header shows date time (e.g., `August-19-2025 14:05:33`) and link info.
+- Data view (C, `d`):
+  - RX: `port_rcv_data` (words), `port_rcv_packets`, `port_rcv_errors`, `port_rcv_remote_physical_errors`, `port_rcv_switch_relay_errors`.
+  - TX: `port_xmit_data` (words), `port_xmit_packets`, `port_xmit_discards`, `port_xmit_wait`.
+  - Other: `port_local_phy_errors`, `symbol_error(s)`, `link_error_recovery`, `link_downed`, `vl15_dropped`, `excessive_buffer_overrun_errors`.
+  - Plotting continues to update while viewing Data.
+- Info view (C, `i`):
+  - Lists non-zero GIDs and their Type and Ndev from `/sys/class/infiniband/<dev>/ports/<port>/`.
+  - Refreshes approximately once per second.
+- CSV logging (both): logs bytes/sec and packets/sec with timestamps.
+
+## Details and Notes
+
+- InfiniBand data counters (`port_*_data`) are octets/4 (4-byte words). The tools multiply by 4 for bytes conversions prior to rate calculation.
+- 64-bit counter wrap-around is handled.
+- Background and colors (C): `--bg black` forces black; `--bg terminal` blends with your terminal theme.
+
+## Examples
+
+- Plot with terminal background (2s run):
+  - `./ib_bw_mon -d mlx5_0 --bg terminal --duration 2`
+- CSV logging:
+  - `./ib_bw_mon -d mlx5_0 --csv out.csv`
