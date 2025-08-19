@@ -42,6 +42,13 @@ typedef struct {
     char *excessive_buf_overrun;
 } counters_t;
 
+typedef struct {
+    int idx;
+    char *gid;
+    char *type;
+    char *ndev;
+} gid_entry_t;
+
 typedef enum { UNITS_BITS, UNITS_BYTES } units_t;
 
 typedef struct {
@@ -200,6 +207,49 @@ static void free_counters(counters_t *c) {
     free(c->excessive_buf_overrun);
 }
 
+static bool gid_is_zero(const char *s)
+{
+    if (!s) return true;
+    for (const char *p = s; *p; ++p) {
+        if (*p == ':') continue;
+        if (*p != '0') return false;
+    }
+    return true;
+}
+
+static void free_gid_list(gid_entry_t *list, int count)
+{
+    if (!list) return;
+    for (int i = 0; i < count; ++i) {
+        free(list[i].gid);
+        free(list[i].type);
+        free(list[i].ndev);
+    }
+    free(list);
+}
+
+static void fetch_gid_list(const char *dev, int port, gid_entry_t **out_list, int *out_count)
+{
+    char port_str[16]; snprintf(port_str, sizeof(port_str), "%d", port);
+    char base[512]; snprintf(base, sizeof(base), "%s/%s/ports/%s", SYSFS_IB_BASE, dev, port_str);
+    gid_entry_t *arr = (gid_entry_t*)calloc(256, sizeof(gid_entry_t));
+    int cnt = 0;
+    for (int i = 0; i < 256; ++i) {
+        char p_gid[640]; snprintf(p_gid, sizeof(p_gid), "%s/gids/%d", base, i);
+        if (access(p_gid, R_OK) != 0) continue;
+        char *gid = read_str_file(p_gid);
+        if (!gid || gid_is_zero(gid)) { free(gid); continue; }
+        char p_type[640]; snprintf(p_type, sizeof(p_type), "%s/gid_attrs/types/%d", base, i);
+        char p_ndev[640]; snprintf(p_ndev, sizeof(p_ndev), "%s/gid_attrs/ndevs/%d", base, i);
+        char *type = read_str_file(p_type);
+        char *ndev = read_str_file(p_ndev);
+        arr[cnt].idx = i; arr[cnt].gid = gid; arr[cnt].type = type ? type : strdup(""); arr[cnt].ndev = ndev ? ndev : strdup("");
+        cnt++;
+    }
+    *out_list = arr;
+    *out_count = cnt;
+}
+
 static double now_monotonic(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
@@ -245,7 +295,7 @@ static void format_scale_label(double v_disp_per_s, units_t units, char *buf, si
 
 static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, double cur_pps,
                            double *hist, int hist_len, units_t units, double rate_gbps,
-                           bool use_colors)
+                           bool use_colors, bool light)
 {
     int wy, wx; getmaxyx(win, wy, wx);
     werase(win);
@@ -300,12 +350,14 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
     // right-aligned drawing: newest sample at far right
     int base_col = y_label_w + 1 + (chart_w - samples);
     // fill plot area with dots in bar color; ensure background matches panel
-    if (use_colors) wcolor_set(win, (title && title[0]=='R')? 1 : 2, NULL);
-    for (int i = 0; i < samples; ++i) {
-        int col = base_col + i;
-        for (int yy = 0; yy < chart_h; ++yy) {
-            int y = 1 + (chart_h - 1 - yy);
-            mvwaddch(win, y, col, '.');
+    if (!light) {
+        if (use_colors) wcolor_set(win, (title && title[0]=='R')? 1 : 2, NULL);
+        for (int i = 0; i < samples; ++i) {
+            int col = base_col + i;
+            for (int yy = 0; yy < chart_h; ++yy) {
+                int y = 1 + (chart_h - 1 - yy);
+                mvwaddch(win, y, col, '.');
+            }
         }
     }
     // draw bars on top
@@ -429,6 +481,7 @@ int main(int argc, char **argv) {
 
     bool paused = false;
     bool data_mode = false; // 'd' toggles data page
+    bool info_mode = false; // 'i' toggles info page
     double rate_gbps = parse_rate_gbps(ctrs.rate);
 
     uint64_t p_txB=0, p_rxB=0, p_txp=0, p_rxp=0;
@@ -452,8 +505,10 @@ int main(int argc, char **argv) {
     int hist_len = 0; // number of valid samples
 
     // windows
-    WINDOW *win_hdr = NULL, *win_rx = NULL, *win_tx = NULL;
+    WINDOW *win_hdr = NULL, *win_rx = NULL, *win_tx = NULL, *win_other = NULL, *win_info = NULL;
     int prev_maxy = -1, prev_maxx = -1;
+    // info cache
+    gid_entry_t *gid_list = NULL; int gid_count = 0; double last_gid_refresh = 0.0;
 
     double start_time = now_monotonic();
     for (; !g_stop; ) {
@@ -472,7 +527,8 @@ int main(int argc, char **argv) {
             if (ch == 'q' || ch == 'Q') break;
             else if (ch == 'p' || ch == 'P') paused = !paused;
             else if (ch == 'u' || ch == 'U') opt.units = (opt.units == UNITS_BITS) ? UNITS_BYTES : UNITS_BITS;
-            else if (ch == 'd' || ch == 'D') { data_mode = !data_mode; fast_switch = true; }
+            else if (ch == 'd' || ch == 'D') { data_mode = !data_mode; info_mode = false; fast_switch = true; }
+            else if (ch == 'i' || ch == 'I') { info_mode = !info_mode; data_mode = false; fast_switch = true; }
         }
 
         static double tx_Bps=0, rx_Bps=0, tx_pps=0, rx_pps=0;
@@ -517,23 +573,56 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Layout: header + two stacked windows: RX then TX
+        // Layout: header + panels
         int maxy, maxx; getmaxyx(stdscr, maxy, maxx);
         int hdr_h = 4;
-        int remaining = maxy - hdr_h;
-        if (remaining < 6) remaining = 6;
-        int rx_h = remaining / 2;
-        int tx_h = remaining - rx_h;
-
-        // recreate windows if size changed
-        if (maxy != prev_maxy || maxx != prev_maxx || !win_hdr || !win_rx || !win_tx) {
-            if (win_hdr) { delwin(win_hdr); win_hdr = NULL; }
+        if (maxy != prev_maxy || maxx != prev_maxx || !win_hdr) {
+            if (win_hdr) { delwin(win_hdr); }
+            win_hdr = newwin(hdr_h, maxx, 0, 0);
+            prev_maxy = maxy; prev_maxx = maxx;
+        }
+        if (info_mode) {
+            // single info window
             if (win_rx) { delwin(win_rx); win_rx = NULL; }
             if (win_tx) { delwin(win_tx); win_tx = NULL; }
-            win_hdr = newwin(hdr_h, maxx, 0, 0);
-            win_rx = newwin(rx_h, maxx, hdr_h, 0);
-            win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0);
-            prev_maxy = maxy; prev_maxx = maxx;
+            if (win_other) { delwin(win_other); win_other = NULL; }
+            int remaining = maxy - hdr_h; if (remaining < 6) remaining = 6;
+            int ch, cw;
+            if (!win_info) { win_info = newwin(remaining, maxx, hdr_h, 0);
+            } else { getmaxyx(win_info, ch, cw); if (ch != remaining || cw != maxx) { delwin(win_info); win_info = newwin(remaining, maxx, hdr_h, 0);} }
+        } else if (!data_mode) {
+            // two stacked windows: RX then TX
+            int remaining = maxy - hdr_h;
+            if (remaining < 6) remaining = 6;
+            int rx_h = remaining / 2;
+            int tx_h = remaining - rx_h;
+            // remove other box if present
+            if (win_other) { delwin(win_other); win_other = NULL; }
+            if (win_info) { delwin(win_info); win_info = NULL; }
+            // recreate RX/TX if size changed
+            int ch, cw;
+            if (!win_rx) {
+                win_rx = newwin(rx_h, maxx, hdr_h, 0);
+            } else { getmaxyx(win_rx, ch, cw); if (ch != rx_h || cw != maxx) { delwin(win_rx); win_rx = newwin(rx_h, maxx, hdr_h, 0); } }
+            if (!win_tx) {
+                win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0);
+            } else { getmaxyx(win_tx, ch, cw); if (ch != tx_h || cw != maxx) { delwin(win_tx); win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0); } }
+        } else {
+            // three stacked windows: RX, TX, OTHER
+            int remaining = maxy - hdr_h;
+            if (remaining < 9) remaining = 9;
+            int each = remaining / 3;
+            int rx_h = each;
+            int tx_h = each;
+            int other_h = remaining - rx_h - tx_h;
+            int ch, cw;
+            if (win_info) { delwin(win_info); win_info = NULL; }
+            if (!win_rx) { win_rx = newwin(rx_h, maxx, hdr_h, 0);
+            } else { getmaxyx(win_rx, ch, cw); if (ch != rx_h || cw != maxx) { delwin(win_rx); win_rx = newwin(rx_h, maxx, hdr_h, 0); } }
+            if (!win_tx) { win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0);
+            } else { getmaxyx(win_tx, ch, cw); if (ch != tx_h || cw != maxx) { delwin(win_tx); win_tx = newwin(tx_h, maxx, hdr_h + rx_h, 0); } }
+            if (!win_other) { win_other = newwin(other_h, maxx, hdr_h + rx_h + tx_h, 0);
+            } else { getmaxyx(win_other, ch, cw); if (ch != other_h || cw != maxx) { delwin(win_other); win_other = newwin(other_h, maxx, hdr_h + rx_h + tx_h, 0); } }
         }
 
         // Header window
@@ -563,31 +652,43 @@ int main(int argc, char **argv) {
         if (ctrs.rate) mvwprintw(win_hdr, 2, maxx/2, "Rate: %s", ctrs.rate);
         if (paused) mvwprintw(win_hdr, 1, maxx-12, "[PAUSED]");
         if (data_mode) mvwprintw(win_hdr, 0, 32, "[DATA]");
+        if (info_mode) mvwprintw(win_hdr, 0, 40, "[INFO]");
         if (use_colors) wattroff(win_hdr, COLOR_PAIR(10));
         wnoutrefresh(win_hdr);
 
-        if (!data_mode) {
+        if (info_mode) {
+            // refresh gid list once per second
+            double nowt = now_monotonic();
+            if ((nowt - last_gid_refresh) > 1.0 || gid_list == NULL) {
+                free_gid_list(gid_list, gid_count);
+                gid_list = NULL; gid_count = 0;
+                fetch_gid_list(opt.device, opt.port, &gid_list, &gid_count);
+                last_gid_refresh = nowt;
+            }
+            werase(win_info);
+            if (use_colors) { wbkgd(win_info, COLOR_PAIR(11)); wattron(win_info, COLOR_PAIR(13)); }
+            box(win_info, 0, 0);
+            if (use_colors) { wattroff(win_info, COLOR_PAIR(13)); wattron(win_info, COLOR_PAIR(10)); }
+            mvwprintw(win_info, 0, 2, " GID Table (non-zero) ");
+            mvwprintw(win_info, 1, 2, "Idx  Type        Ndev              GID");
+            int wy, wx; getmaxyx(win_info, wy, wx);
+            int row = 2;
+            for (int i = 0; i < gid_count && row < wy-1; ++i) {
+                char line[512];
+                snprintf(line, sizeof(line), "%3d  %-10s  %-16s  %s", gid_list[i].idx,
+                         gid_list[i].type ? gid_list[i].type : "",
+                         gid_list[i].ndev ? gid_list[i].ndev : "",
+                         gid_list[i].gid ? gid_list[i].gid : "");
+                mvwprintw(win_info, row++, 2, "%.*s", wx-4, line);
+            }
+            if (use_colors) wattroff(win_info, COLOR_PAIR(10));
+            wnoutrefresh(win_info);
+        } else if (!data_mode) {
             // Draw RX/TX graph panels
-            draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors);
-            draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors);
+            draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors, fast_switch);
+            draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors, fast_switch);
         } else {
             // Draw raw counters panels
-            // Adjust layout to 3 panels in data mode
-            int maxy2, maxx2; getmaxyx(stdscr, maxy2, maxx2);
-            int hdr_h2 = 4;
-            int remaining2 = maxy2 - hdr_h2;
-            if (remaining2 < 9) remaining2 = 9;
-            int each = remaining2 / 3;
-            int rx_h2 = each;
-            int tx_h2 = each;
-            int other_h2 = remaining2 - rx_h2 - tx_h2;
-            // Recreate windows for data mode layout
-            if (win_rx) { delwin(win_rx); win_rx = NULL; }
-            if (win_tx) { delwin(win_tx); win_tx = NULL; }
-            WINDOW *win_other = newwin(other_h2, maxx2, hdr_h2 + rx_h2 + tx_h2, 0);
-            win_rx = newwin(rx_h2, maxx2, hdr_h2, 0);
-            win_tx = newwin(tx_h2, maxx2, hdr_h2 + rx_h2, 0);
-
             // RX panel
             werase(win_rx);
             if (use_colors) {
@@ -602,13 +703,13 @@ int main(int argc, char **argv) {
             mvwprintw(win_rx, 0, 2, " RX Raw Counters ");
             mvwprintw(win_rx, 1, 2, "port_rcv_data:    %20" PRIu64 " %s", raw_rx_data, ctrs.data_is_words ? "(words)" : "" );
             mvwprintw(win_rx, 2, 2, "port_rcv_packets: %20" PRIu64, raw_rx_pkts);
-            if (ctrs.rx_errors) {
+            if (!fast_switch && ctrs.rx_errors) {
                 uint64_t v; if (read_u64_file(ctrs.rx_errors, &v)) mvwprintw(win_rx, 3, 2, "port_rcv_errors: %20" PRIu64, v);
             }
-            if (ctrs.rx_remote_phy_err) {
+            if (!fast_switch && ctrs.rx_remote_phy_err) {
                 uint64_t v; if (read_u64_file(ctrs.rx_remote_phy_err, &v)) mvwprintw(win_rx, 4, 2, "rcv_remote_phy:   %20" PRIu64, v);
             }
-            if (ctrs.rx_switch_relay_err) {
+            if (!fast_switch && ctrs.rx_switch_relay_err) {
                 uint64_t v; if (read_u64_file(ctrs.rx_switch_relay_err, &v)) mvwprintw(win_rx, 5, 2, "rcv_switch_relay: %20" PRIu64, v);
             }
             if (use_colors) wattroff(win_rx, COLOR_PAIR(10));
@@ -628,10 +729,10 @@ int main(int argc, char **argv) {
             mvwprintw(win_tx, 0, 2, " TX Raw Counters ");
             mvwprintw(win_tx, 1, 2, "port_xmit_data:   %20" PRIu64 " %s", raw_tx_data, ctrs.data_is_words ? "(words)" : "" );
             mvwprintw(win_tx, 2, 2, "port_xmit_packets:%20" PRIu64, raw_tx_pkts);
-            if (ctrs.tx_discards) {
+            if (!fast_switch && ctrs.tx_discards) {
                 uint64_t v; if (read_u64_file(ctrs.tx_discards, &v)) mvwprintw(win_tx, 3, 2, "xmit_discards:    %20" PRIu64, v);
             }
-            if (ctrs.tx_wait) {
+            if (!fast_switch && ctrs.tx_wait) {
                 uint64_t v; if (read_u64_file(ctrs.tx_wait, &v)) mvwprintw(win_tx, 4, 2, "xmit_wait:        %20" PRIu64, v);
             }
             if (use_colors) wattroff(win_tx, COLOR_PAIR(10));
@@ -650,12 +751,12 @@ int main(int argc, char **argv) {
             }
             mvwprintw(win_other, 0, 2, " Other Counters ");
             int rowo = 1;
-            if (ctrs.local_phy_errors) { uint64_t v; if (read_u64_file(ctrs.local_phy_errors, &v)) { mvwprintw(win_other, rowo++, 2, "local_phy_errors: %20" PRIu64, v);} }
-            if (ctrs.symbol_error) { uint64_t v; if (read_u64_file(ctrs.symbol_error, &v)) { mvwprintw(win_other, rowo++, 2, "symbol_error:     %20" PRIu64, v);} }
-            if (ctrs.link_error_recovery) { uint64_t v; if (read_u64_file(ctrs.link_error_recovery, &v)) { mvwprintw(win_other, rowo++, 2, "link_err_recov:   %20" PRIu64, v);} }
-            if (ctrs.link_downed) { uint64_t v; if (read_u64_file(ctrs.link_downed, &v)) { mvwprintw(win_other, rowo++, 2, "link_downed:      %20" PRIu64, v);} }
-            if (ctrs.vl15_dropped) { uint64_t v; if (read_u64_file(ctrs.vl15_dropped, &v)) { mvwprintw(win_other, rowo++, 2, "vl15_dropped:     %20" PRIu64, v);} }
-            if (ctrs.excessive_buf_overrun) { uint64_t v; if (read_u64_file(ctrs.excessive_buf_overrun, &v)) { mvwprintw(win_other, rowo++, 2, "excess_buf_over:  %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.local_phy_errors) { uint64_t v; if (read_u64_file(ctrs.local_phy_errors, &v)) { mvwprintw(win_other, rowo++, 2, "local_phy_errors: %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.symbol_error) { uint64_t v; if (read_u64_file(ctrs.symbol_error, &v)) { mvwprintw(win_other, rowo++, 2, "symbol_error:     %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.link_error_recovery) { uint64_t v; if (read_u64_file(ctrs.link_error_recovery, &v)) { mvwprintw(win_other, rowo++, 2, "link_err_recov:   %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.link_downed) { uint64_t v; if (read_u64_file(ctrs.link_downed, &v)) { mvwprintw(win_other, rowo++, 2, "link_downed:      %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.vl15_dropped) { uint64_t v; if (read_u64_file(ctrs.vl15_dropped, &v)) { mvwprintw(win_other, rowo++, 2, "vl15_dropped:     %20" PRIu64, v);} }
+            if (!fast_switch && ctrs.excessive_buf_overrun) { uint64_t v; if (read_u64_file(ctrs.excessive_buf_overrun, &v)) { mvwprintw(win_other, rowo++, 2, "excess_buf_over:  %20" PRIu64, v);} }
             if (use_colors) wattroff(win_other, COLOR_PAIR(10));
             wnoutrefresh(win_other);
         }
@@ -680,8 +781,11 @@ int main(int argc, char **argv) {
     if (win_hdr) delwin(win_hdr);
     if (win_rx) delwin(win_rx);
     if (win_tx) delwin(win_tx);
+    if (win_other) delwin(win_other);
+    if (win_info) delwin(win_info);
     endwin();
     if (csv) fclose(csv);
+    free_gid_list(gid_list, gid_count);
     free_counters(&ctrs);
     return 0;
 }
