@@ -16,6 +16,7 @@ class CounterPaths:
     def __init__(self, base: str, is_ib: bool):
         self.base = base
         self.is_ib = is_ib
+        self.data_is_words = False
         # Prefer canonical names; allow common variants as fallback.
         self.tx_data = first_existing(
             base,
@@ -47,6 +48,11 @@ class CounterPaths:
                 "rx_packets",
             ],
         )
+        # Determine if data counters are 4-byte words
+        if self.tx_data and os.path.basename(self.tx_data) == "port_xmit_data":
+            self.data_is_words = True
+        if self.rx_data and os.path.basename(self.rx_data) == "port_rcv_data":
+            self.data_is_words = True
 
 
 def first_existing(base: str, names: list) -> Optional[str]:
@@ -178,8 +184,8 @@ def draw(screen, args):
             curses.use_default_colors()
         except Exception:
             pass
-        curses.init_pair(1, curses.COLOR_CYAN, -1)      # RX bars
-        curses.init_pair(2, curses.COLOR_RED, -1)       # TX bars
+        curses.init_pair(1, curses.COLOR_CYAN, curses.COLOR_BLACK)  # RX bars (bg matches panel)
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)   # TX bars (bg matches panel)
         curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_BLACK)  # light text
         curses.init_pair(11, curses.COLOR_BLACK, curses.COLOR_BLACK)  # panel bg
         curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_BLACK)  # header bg
@@ -348,7 +354,7 @@ def draw(screen, args):
             # title and current values
             try:
                 if has_colors:
-                    win.attron(curses.color_pair(10))
+                    win.attrset(curses.color_pair(10))
                 win.addstr(0, 2, f" {'RX' if is_rx else 'TX'}  {human_rate(cur_Bps, args.units)}  {human_pps(cur_pps)} ")
             except curses.error:
                 pass
@@ -398,42 +404,34 @@ def draw(screen, args):
                 win.addstr(1 + chart_h - 1, 1, f"{bot_label:>{y_label_w-3}} |")
             except curses.error:
                 pass
+            # right-aligned columns: newest at far right
+            base_col = y_label_w + 1 + (chart_w - samples)
             # fill dots
-            for x in range(samples):
-                col = y_label_w + 1 + x
+            for i in range(samples):
+                col = base_col + i
                 for yy in range(chart_h):
                     y = 1 + (chart_h - 1 - yy)
                     try:
+                        if has_colors:
+                            win.attrset(curses.color_pair(1 if is_rx else 2))
                         win.addch(y, col, ord('.'))
                     except curses.error:
                         pass
             # draw bars
-            for x in range(samples):
-                v = scaled(data_list[-samples + x])
+            for i in range(samples):
+                v = scaled(data_list[-samples + i])
                 h = int(round((v / maxv) * chart_h))
                 h = max(0, min(chart_h, h))
-                col = y_label_w + 1 + x
+                col = base_col + i
                 for yy in range(h):
                     y = 1 + (chart_h - 1 - yy)
                     try:
                         if has_colors:
-                            win.attron(curses.color_pair(1 if is_rx else 2))
+                            win.attrset(curses.color_pair(1 if is_rx else 2))
                         win.addch(y, col, ord('|'))
-                        if has_colors:
-                            win.attroff(curses.color_pair(1 if is_rx else 2))
                     except curses.error:
                         pass
-            try:
-                for x in range(samples):
-                    win.addch(1 + chart_h, y_label_w + 1 + x, ord('_'))
-                # x-axis label
-                xt = 'time'
-                xcol = y_label_w + 1 + samples - len(xt)
-                if xcol < y_label_w + 1:
-                    xcol = y_label_w + 1
-                win.addstr(1 + chart_h, xcol, xt)
-            except curses.error:
-                pass
+            # no x-axis
             if has_colors:
                 try:
                     win.attroff(curses.color_pair(10))

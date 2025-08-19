@@ -24,7 +24,7 @@ typedef struct {
     char *rx_data;
     char *tx_pkts;
     char *rx_pkts;
-    bool is_ib; // if true, data counters are 4-byte words
+    bool data_is_words; // true if data counters are 4-byte words
     char *link_layer;
     char *rate;
 } counters_t;
@@ -40,6 +40,7 @@ typedef struct {
     bool csv_append;
     bool csv_headers;
     double duration; // seconds, 0 = infinite
+    int bg_mode; // 0 = black, 1 = terminal default (-1)
 } opts_t;
 
 static volatile sig_atomic_t g_stop = 0;
@@ -47,14 +48,7 @@ static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 static volatile sig_atomic_t g_resized = 0;
 static void on_sigwinch(int sig) { (void)sig; g_resized = 1; }
 
-static char *path_join3(const char *a, const char *b, const char *c) {
-    size_t la = strlen(a), lb = strlen(b), lc = strlen(c);
-    size_t n = la + 1 + lb + 1 + lc + 1;
-    char *s = (char *)malloc(n);
-    if (!s) return NULL;
-    snprintf(s, n, "%s/%s/%s", a, b, c);
-    return s;
-}
+/* removed unused path_join3 */
 
 static char *path_join4(const char *a, const char *b, const char *c, const char *d) {
     size_t la = strlen(a), lb = strlen(b), lc = strlen(c), ld = strlen(d);
@@ -135,10 +129,7 @@ static bool resolve_counters(const char *device, int port, counters_t *c) {
     c->rate = read_str_file(rate_path);
     free(rate_path);
 
-    c->is_ib = false;
-    if (c->link_layer) {
-        if (strncasecmp(c->link_layer, "infiniband", 10) == 0) c->is_ib = true;
-    }
+    c->data_is_words = false;
 
     // counters
     const char *tx_data_candidates[] = { "port_xmit_data", "tx_bytes", NULL };
@@ -150,6 +141,10 @@ static bool resolve_counters(const char *device, int port, counters_t *c) {
     c->rx_data = first_existing(counters_base, rx_data_candidates);
     c->tx_pkts = first_existing(counters_base, tx_pkts_candidates);
     c->rx_pkts = first_existing(counters_base, rx_pkts_candidates);
+
+    // Determine if data counters are in 4-byte words (typical for port_*_data)
+    if (c->tx_data && strstr(c->tx_data, "port_xmit_data")) c->data_is_words = true;
+    if (c->rx_data && strstr(c->rx_data, "port_rcv_data")) c->data_is_words = true;
 
     free(port_base);
     free(counters_base);
@@ -212,8 +207,11 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
 {
     int wy, wx; getmaxyx(win, wy, wx);
     werase(win);
-    if (use_colors) wbkgd(win, COLOR_PAIR(11));
-    if (use_colors) wattron(win, COLOR_PAIR(13));
+    if (use_colors) {
+        wbkgd(win, COLOR_PAIR(11));
+        wbkgdset(win, COLOR_PAIR(11) | ' ');
+        wattron(win, COLOR_PAIR(13));
+    }
     box(win, 0, 0);
     if (use_colors) wattroff(win, COLOR_PAIR(13));
     char ratebuf[64], ppsbuf[64];
@@ -257,35 +255,32 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
     mvwprintw(win, 1 + chart_h/2, 1, "%*s |", y_label_w-3, midbuf);
     mvwprintw(win, 1 + chart_h - 1, 1, "%*s |", y_label_w-3, botbuf);
 
-    // fill empty region with '.' then draw bars
-    for (int x = 0; x < samples; ++x) {
-        int col = y_label_w + 1 + x;
+    // right-aligned drawing: newest sample at far right
+    int base_col = y_label_w + 1 + (chart_w - samples);
+    // fill plot area with dots in bar color; ensure background matches panel
+    if (use_colors) wcolor_set(win, (title && title[0]=='R')? 1 : 2, NULL);
+    for (int i = 0; i < samples; ++i) {
+        int col = base_col + i;
         for (int yy = 0; yy < chart_h; ++yy) {
             int y = 1 + (chart_h - 1 - yy);
             mvwaddch(win, y, col, '.');
         }
     }
-    for (int x = 0; x < samples; ++x) {
-        double v = hist[hist_len - samples + x];
+    // draw bars on top
+    if (use_colors) wcolor_set(win, (title && title[0]=='R')? 1 : 2, NULL);
+    for (int i = 0; i < samples; ++i) {
+        double v = hist[hist_len - samples + i];
         if (units == UNITS_BITS) v *= 8.0;
         int h = (int)llround((v / maxv) * chart_h);
-        if (h < 0) h = 0; if (h > chart_h) h = chart_h;
-        int col = y_label_w + 1 + x;
+        if (h < 0) h = 0;
+        if (h > chart_h) h = chart_h;
+        int col = base_col + i;
         for (int yy = 0; yy < h; ++yy) {
             int y = 1 + (chart_h - 1 - yy);
-            if (use_colors) wattron(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
             mvwaddch(win, y, col, '|');
-            if (use_colors) wattroff(win, (title && title[0]=='R')? COLOR_PAIR(1) : COLOR_PAIR(2));
         }
     }
-    // baseline and x-axis label
-    for (int x = 0; x < samples; ++x) mvwaddch(win, 1 + chart_h, y_label_w + 1 + x, '_');
-    const char *xt = "time";
-    int xt_col = y_label_w + 1 + samples - (int)strlen(xt);
-    if (xt_col < y_label_w + 1) xt_col = y_label_w + 1;
-    mvwprintw(win, 1 + chart_h, xt_col, "%s", xt);
-    mvwprintw(win, wy-1, wx-18, (title && title[0]=='R')? "Bars:| Cyan" : "Bars:| Red");
-    if (use_colors) wattroff(win, COLOR_PAIR(10));
+    if (use_colors) wcolor_set(win, 10, NULL);
     wnoutrefresh(win);
 }
 
@@ -302,12 +297,14 @@ int main(int argc, char **argv) {
     opt.port = 1;
     opt.interval = 1.0;
     opt.units = UNITS_BITS;
+    opt.bg_mode = 0;
 
     static struct option long_opts[] = {
         {"device", required_argument, 0, 'd'},
         {"port", required_argument, 0, 'p'},
         {"interval", required_argument, 0, 'i'},
         {"units", required_argument, 0, 'u'},
+        {"bg", required_argument, 0, 1004},
         {"csv", required_argument, 0, 1000},
         {"csv-append", no_argument, 0, 1001},
         {"csv-headers", no_argument, 0, 1002},
@@ -329,6 +326,11 @@ int main(int argc, char **argv) {
             case 1001: opt.csv_append = true; break;
             case 1002: opt.csv_headers = true; break;
             case 1003: opt.duration = atof(optarg); break;
+            case 1004:
+                if (strcasecmp(optarg, "black") == 0) opt.bg_mode = 0;
+                else if (strcasecmp(optarg, "terminal") == 0) opt.bg_mode = 1;
+                else { fprintf(stderr, "Invalid --bg: %s (use black|terminal)\n", optarg); return 2; }
+                break;
             default: usage(argv[0]); return 2;
         }
     }
@@ -372,12 +374,15 @@ int main(int argc, char **argv) {
         start_color();
         use_colors = true;
         use_default_colors();
-        init_pair(1, COLOR_CYAN, -1);               // RX bars
-        init_pair(2, COLOR_RED, -1);                // TX bars
-        init_pair(10, COLOR_WHITE, COLOR_BLACK);    // light text on dark bg
-        init_pair(11, COLOR_BLACK, COLOR_BLACK);    // panel bg
-        init_pair(12, COLOR_BLACK, COLOR_BLACK);    // header bg
-        init_pair(13, COLOR_WHITE, COLOR_BLACK);    // borders
+        int bg = (opt.bg_mode == 1 ? -1 : COLOR_BLACK);
+        int fg_text = (opt.bg_mode == 1 ? -1 : COLOR_WHITE);
+        int fg_border = (opt.bg_mode == 1 ? -1 : COLOR_WHITE);
+        init_pair(1, COLOR_CYAN, bg);               // RX bars
+        init_pair(2, COLOR_RED, bg);                // TX bars
+        init_pair(10, fg_text, bg);                 // text matches terminal in 'terminal' mode
+        init_pair(11, bg, bg);                      // panel bg
+        init_pair(12, bg, bg);                      // header bg
+        init_pair(13, fg_border, bg);               // borders
     }
 
     bool paused = false;
@@ -433,12 +438,12 @@ int main(int argc, char **argv) {
             double now = now_monotonic();
             double dt = now - prev_t; if (dt <= 0) dt = 1e-9;
             if (ok) {
-                uint64_t d_txB = (c_txB >= p_txB) ? (c_txB - p_txB) : (c_txB + (1ULL<<64) - p_txB);
-                uint64_t d_rxB = (c_rxB >= p_rxB) ? (c_rxB - p_rxB) : (c_rxB + (1ULL<<64) - p_rxB);
-                uint64_t d_txp = (c_txp >= p_txp) ? (c_txp - p_txp) : (c_txp + (1ULL<<64) - p_txp);
-                uint64_t d_rxp = (c_rxp >= p_rxp) ? (c_rxp - p_rxp) : (c_rxp + (1ULL<<64) - p_rxp);
+                uint64_t d_txB = (c_txB >= p_txB) ? (c_txB - p_txB) : (c_txB + (UINT64_MAX - p_txB) + 1);
+                uint64_t d_rxB = (c_rxB >= p_rxB) ? (c_rxB - p_rxB) : (c_rxB + (UINT64_MAX - p_rxB) + 1);
+                uint64_t d_txp = (c_txp >= p_txp) ? (c_txp - p_txp) : (c_txp + (UINT64_MAX - p_txp) + 1);
+                uint64_t d_rxp = (c_rxp >= p_rxp) ? (c_rxp - p_rxp) : (c_rxp + (UINT64_MAX - p_rxp) + 1);
 
-                if (ctrs.is_ib) { d_txB *= 4; d_rxB *= 4; }
+                if (ctrs.data_is_words) { d_txB *= 4; d_rxB *= 4; }
                 tx_Bps = (double)d_txB / dt; rx_Bps = (double)d_rxB / dt;
                 tx_pps = (double)d_txp / dt; rx_pps = (double)d_rxp / dt;
 

@@ -28,7 +28,7 @@ If your system requires wide curses, use: `make LIBS=-lncursesw`.
 ## Usage (C)
 
 ```
-./ib_bw_mon -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
+./ib_bw_mon -d mlx5_0 [-p 1] [-i 1] [--units bits|bytes] [--bg black|terminal] [--csv file.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 ## Usage (Python)
@@ -49,6 +49,7 @@ Keys in TUI:
 - `q`: quit
 - `p`: pause/resume sampling
 - `u`: toggle units between bits/s and bytes/s
+ - `--bg`: choose `terminal` to use your terminal’s background or `black` (default: terminal on some terminals may look better)
  - `--duration N`: auto-exit after N seconds (useful for quick tests)
 
 ## Notes
