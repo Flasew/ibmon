@@ -1,4 +1,4 @@
-# ib_bw_mon
+# ibmon
 
 InfiniBand bandwidth and packet monitor with a fast, curses-based TUI.
 
