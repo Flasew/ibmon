@@ -413,6 +413,60 @@ static void draw_device_pane(WINDOW *pane, const char *devname, mon_dev_t *md, u
     wnoutrefresh(pane);
 }
 
+static void draw_device_data_pane(WINDOW *pane, const char *devname, mon_dev_t *md, bool use_colors)
+{
+    int ph, pw; getmaxyx(pane, ph, pw);
+    werase(pane);
+    if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
+    box(pane, 0, 0);
+    if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
+    mvwprintw(pane, 0, 2, " %s — Raw Counters ", devname);
+    int row = 1;
+    uint64_t v;
+    if (md->ctrs.rx_data && read_u64_file(md->ctrs.rx_data, &v)) mvwprintw(pane, row++, 2, "port_rcv_data:    %20" PRIu64 " %s", v, md->ctrs.data_is_words ? "(words)" : "");
+    if (md->ctrs.rx_pkts && read_u64_file(md->ctrs.rx_pkts, &v)) mvwprintw(pane, row++, 2, "port_rcv_packets: %20" PRIu64, v);
+    if (md->ctrs.rx_errors && read_u64_file(md->ctrs.rx_errors, &v)) mvwprintw(pane, row++, 2, "port_rcv_errors:  %20" PRIu64, v);
+    if (md->ctrs.rx_remote_phy_err && read_u64_file(md->ctrs.rx_remote_phy_err, &v)) mvwprintw(pane, row++, 2, "rcv_remote_phy:   %20" PRIu64, v);
+    if (md->ctrs.rx_switch_relay_err && read_u64_file(md->ctrs.rx_switch_relay_err, &v)) mvwprintw(pane, row++, 2, "rcv_switch_relay: %20" PRIu64, v);
+    if (md->ctrs.tx_data && read_u64_file(md->ctrs.tx_data, &v)) mvwprintw(pane, row++, 2, "port_xmit_data:   %20" PRIu64 " %s", v, md->ctrs.data_is_words ? "(words)" : "");
+    if (md->ctrs.tx_pkts && read_u64_file(md->ctrs.tx_pkts, &v)) mvwprintw(pane, row++, 2, "port_xmit_packets:%20" PRIu64, v);
+    if (md->ctrs.tx_discards && read_u64_file(md->ctrs.tx_discards, &v)) mvwprintw(pane, row++, 2, "xmit_discards:    %20" PRIu64, v);
+    if (md->ctrs.tx_wait && read_u64_file(md->ctrs.tx_wait, &v)) mvwprintw(pane, row++, 2, "xmit_wait:        %20" PRIu64, v);
+    if (md->ctrs.local_phy_errors && read_u64_file(md->ctrs.local_phy_errors, &v)) mvwprintw(pane, row++, 2, "local_phy_errors: %20" PRIu64, v);
+    if (md->ctrs.symbol_error && read_u64_file(md->ctrs.symbol_error, &v)) mvwprintw(pane, row++, 2, "symbol_error:     %20" PRIu64, v);
+    if (md->ctrs.link_error_recovery && read_u64_file(md->ctrs.link_error_recovery, &v)) mvwprintw(pane, row++, 2, "link_err_recov:   %20" PRIu64, v);
+    if (md->ctrs.link_downed && read_u64_file(md->ctrs.link_downed, &v)) mvwprintw(pane, row++, 2, "link_downed:      %20" PRIu64, v);
+    if (md->ctrs.vl15_dropped && read_u64_file(md->ctrs.vl15_dropped, &v)) mvwprintw(pane, row++, 2, "vl15_dropped:     %20" PRIu64, v);
+    if (md->ctrs.excessive_buf_overrun && read_u64_file(md->ctrs.excessive_buf_overrun, &v)) mvwprintw(pane, row++, 2, "excess_buf_over:  %20" PRIu64, v);
+    if (use_colors) wattroff(pane, COLOR_PAIR(10));
+    wnoutrefresh(pane);
+}
+
+static void draw_device_info_pane(WINDOW *pane, const char *devname, bool use_colors)
+{
+    int ph, pw; getmaxyx(pane, ph, pw);
+    werase(pane);
+    if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
+    box(pane, 0, 0);
+    if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
+    mvwprintw(pane, 0, 2, " %s — GIDs ", devname);
+    mvwprintw(pane, 1, 2, "Idx  Type        Ndev              GID");
+    gid_entry_t *list = NULL; int cnt = 0;
+    fetch_gid_list(devname, 1, &list, &cnt);
+    int row = 2;
+    for (int i = 0; i < cnt && row < ph - 1; ++i) {
+        char line[512];
+        snprintf(line, sizeof(line), "%3d  %-10s  %-16s  %s", list[i].idx,
+                 list[i].type ? list[i].type : "",
+                 list[i].ndev ? list[i].ndev : "",
+                 list[i].gid ? list[i].gid : "");
+        mvwprintw(pane, row++, 2, "%.*s", pw - 4, line);
+    }
+    free_gid_list(list, cnt);
+    if (use_colors) wattroff(pane, COLOR_PAIR(10));
+    wnoutrefresh(pane);
+}
+
 static bool file_read_has(const char *path, const char *needle)
 {
     char *s = read_str_file(path);
@@ -494,11 +548,20 @@ static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
     }
     double start_time = now_monotonic();
     double prev_t = now_monotonic();
+    enum { VIEW_PLOT=0, VIEW_DATA=1, VIEW_INFO=2 };
+    int view = VIEW_PLOT; bool paused = false;
     for (;;) {
-        int ch = getch(); if (ch == 'q' || ch == 'Q') break;
-        bool fast_switch = (ch == 'd' || ch == 'D' || ch == 'i' || ch == 'I');
+        int ch = getch();
+        bool fast_switch = false;
+        if (ch != ERR) {
+            if (ch == 'q' || ch == 'Q') break;
+            if (ch == 'u' || ch == 'U') opt->units = (opt->units == UNITS_BITS) ? UNITS_BYTES : UNITS_BITS;
+            if (ch == 'p' || ch == 'P') paused = !paused;
+            if (ch == 'd' || ch == 'D') { view = (view == VIEW_DATA) ? VIEW_PLOT : VIEW_DATA; fast_switch = true; }
+            if (ch == 'i' || ch == 'I') { view = (view == VIEW_INFO) ? VIEW_PLOT : VIEW_INFO; fast_switch = true; }
+        }
         double nowt = now_monotonic(); double dt = nowt - prev_t; if (dt <= 0) dt = 1e-9;
-        if (!fast_switch) {
+        if (!fast_switch && !paused) {
             for (int i = 0; i < ndev; ++i) {
                 if (!md[i].ctrs.tx_data) continue;
                 uint64_t c_txB=0,c_rxB=0,c_txp=0,c_rxp=0;
@@ -523,7 +586,8 @@ static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
         // Header
         erase();
         if (use_colors) attron(COLOR_PAIR(10));
-        mvprintw(0,2," ibmon — multi-device (%d) [q:quit u:units] ", ndev);
+        const char *mode_str = (view==VIEW_PLOT?"PLOT":(view==VIEW_DATA?"DATA":"INFO"));
+        mvprintw(0,2," ibmon — multi-device (%d) [%s] [q:quit u:units p:pause d:data i:info] ", ndev, mode_str);
         if (use_colors) attroff(COLOR_PAIR(10));
         int hdr_h = 1;
         // Grid
@@ -536,7 +600,12 @@ static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
             int x = c * cell_w; int w = (c == cols-1) ? (maxx - x) : cell_w;
             if (!md[i].win) md[i].win = newwin(h, w, y, x);
             else { int ch, cw; getmaxyx(md[i].win, ch, cw); if (ch != h || cw != w) { delwin(md[i].win); md[i].win = newwin(h, w, y, x);} }
-            draw_device_pane(md[i].win, md[i].name, &md[i], opt->units, use_colors, fast_switch);
+            if (view == VIEW_PLOT)
+                draw_device_pane(md[i].win, md[i].name, &md[i], opt->units, use_colors, fast_switch);
+            else if (view == VIEW_DATA)
+                draw_device_data_pane(md[i].win, md[i].name, &md[i], use_colors);
+            else
+                draw_device_info_pane(md[i].win, md[i].name, use_colors);
         }
         doupdate();
         double elapsed = now_monotonic() - nowt; double to_sleep = fast_switch ? 0.0 : (opt->interval - elapsed);
