@@ -183,10 +183,11 @@ def draw(screen, args):
     curses.use_default_colors()
     screen.nodelay(True)
     # Small blocking timeout improves key capture reliability on some terminals
+    # Make getch non-blocking; we manage sleeping ourselves to allow instant redraw on toggles
     try:
-        screen.timeout(max(10, min(200, int(args.interval * 1000 / 2))))
+        screen.timeout(0)
     except Exception:
-        screen.timeout(50)
+        pass
     try:
         screen.keypad(True)
     except Exception:
@@ -250,6 +251,10 @@ def draw(screen, args):
     win_tx = None
 
     start_time = time.perf_counter()
+    first_draw = True
+    # Start with immediate getch to render first frame instantly; switch to interval timeout after first draw
+    screen.timeout(0)
+    timeout_ms = max(10, int(args.interval * 1000))
 
     while True:
         start_loop = time.perf_counter()
@@ -264,20 +269,26 @@ def draw(screen, args):
                 return
             elif ch in (ord('p'), ord('P')):
                 paused = not paused
+                fast_switch = True
+                break
             elif ch in (ord('u'), ord('U')):
                 args.units = 'bytes' if args.units == 'bits' else 'bits'
+                fast_switch = True
+                break
             elif ch in (ord('d'), ord('D')):
                 data_mode = not data_mode
                 if data_mode:
                     info_mode = False
                 fast_switch = True
+                break
             elif ch in (ord('i'), ord('I')):
                 info_mode = not info_mode
                 if info_mode:
                     data_mode = False
                 fast_switch = True
+                break
 
-        if not paused:
+        if not paused and not fast_switch:
             try:
                 cur = read_counters(paths)
                 now = time.perf_counter()
@@ -577,12 +588,12 @@ def draw(screen, args):
                 pass
 
         curses.doupdate()
+        if first_draw:
+            first_draw = False
+            screen.timeout(timeout_ms)
 
         # Sleep remaining time to maintain interval
-        elapsed = time.perf_counter() - start_loop
-        to_sleep = args.interval - elapsed
-        if (not fast_switch) and to_sleep > 0:
-            time.sleep(to_sleep)
+        # No explicit sleep; getch() blocks up to timeout_ms or returns immediately on keypress
 
         if args.duration and args.duration > 0 and (time.perf_counter() - start_time) >= args.duration:
             break
