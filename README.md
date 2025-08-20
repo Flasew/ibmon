@@ -88,3 +88,7 @@ Arguments:
   - `./ibmon -d mlx5_0 --bg terminal --duration 2`
 - CSV logging:
   - `./ibmon -d mlx5_0 --csv out.csv`
+
+## Credit
+
+This project was written with OpenAI’s Codex in basically exactly one context window — I didn’t write a single line of code. I provided prompts, reviewed outputs, and let the model generate the implementation end-to-end. For the record, I have no experience writing TUI programs and basically no idea where to start — any cleverness here belongs to the tool, not me. Sharing this to be transparent and to give credit where it’s due. It’s interesting times!
