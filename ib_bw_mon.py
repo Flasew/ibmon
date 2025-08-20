@@ -223,6 +223,8 @@ def draw(screen, args):
     prev_t = time.perf_counter()
 
     paused = False
+    data_mode = False
+    info_mode = False
     # CSV setup
     csv_file = None
     csv_writer = None
@@ -263,6 +265,14 @@ def draw(screen, args):
                 paused = not paused
             elif ch in (ord('u'), ord('U')):
                 args.units = 'bytes' if args.units == 'bits' else 'bits'
+            elif ch in (ord('d'), ord('D')):
+                data_mode = not data_mode
+                if data_mode:
+                    info_mode = False
+            elif ch in (ord('i'), ord('I')):
+                info_mode = not info_mode
+                if info_mode:
+                    data_mode = False
 
         if not paused:
             try:
@@ -343,7 +353,8 @@ def draw(screen, args):
             except curses.error:
                 pass
             win_hdr.addstr(1, 2, f"{args.device} port {args.port}  [q:quit p:pause u:units]")
-            win_hdr.addstr(2, 2, f"Interval: {args.interval*1000:.0f} ms   Units: {args.units}")
+            view = 'DATA' if data_mode else ('INFO' if info_mode else 'PLOT')
+            win_hdr.addstr(2, 2, f"Interval: {args.interval*1000:.0f} ms   Units: {args.units}   View: {view}")
             if link_layer:
                 win_hdr.addstr(1, maxx//2, f"Link: {link_layer}")
             if rate:
@@ -456,8 +467,115 @@ def draw(screen, args):
             win.noutrefresh()
 
         # Draw panels
-        draw_panel(win_rx, True, rx_Bps, rx_pps, rx_hist)
-        draw_panel(win_tx, False, tx_Bps, tx_pps, tx_hist)
+        if not data_mode and not info_mode:
+            draw_panel(win_rx, True, rx_Bps, rx_pps, rx_hist)
+            draw_panel(win_tx, False, tx_Bps, tx_pps, tx_hist)
+        elif data_mode:
+            # Raw counters view
+            win_rx.erase()
+            try:
+                if has_colors:
+                    win_rx.bkgd(' ', curses.color_pair(11))
+                    win_rx.attron(curses.color_pair(13))
+                win_rx.box()
+                if has_colors:
+                    win_rx.attroff(curses.color_pair(13))
+                    win_rx.attron(curses.color_pair(10))
+                win_rx.addstr(0, 2, " RX - Raw Counters ")
+                def read_u64(p):
+                    try:
+                        with open(p, 'r') as f:
+                            return int(f.read().split()[0])
+                    except Exception:
+                        return None
+                base = f"/sys/class/infiniband/{args.device}/ports/{args.port}/counters"
+                lines = []
+                val = read_u64(f"{base}/port_rcv_data");   lines.append(("port_rcv_data", val))
+                val = read_u64(f"{base}/port_rcv_packets");lines.append(("port_rcv_packets", val))
+                val = read_u64(f"{base}/port_rcv_errors"); lines.append(("port_rcv_errors", val))
+                val = read_u64(f"{base}/port_rcv_remote_physical_errors"); lines.append(("rcv_remote_phy", val))
+                val = read_u64(f"{base}/port_rcv_switch_relay_errors");  lines.append(("rcv_switch_relay", val))
+                for idx,(k,v) in enumerate(lines):
+                    if v is not None:
+                        win_rx.addstr(1+idx, 2, f"{k:20s} {v:20d}")
+                if has_colors:
+                    win_rx.attroff(curses.color_pair(10))
+            except curses.error:
+                pass
+            win_rx.noutrefresh()
+
+            win_tx.erase()
+            try:
+                if has_colors:
+                    win_tx.bkgd(' ', curses.color_pair(11))
+                    win_tx.attron(curses.color_pair(13))
+                win_tx.box()
+                if has_colors:
+                    win_tx.attroff(curses.color_pair(13))
+                    win_tx.attron(curses.color_pair(10))
+                win_tx.addstr(0, 2, " TX - Raw Counters ")
+                base = f"/sys/class/infiniband/{args.device}/ports/{args.port}/counters"
+                lines = []
+                val = read_u64(f"{base}/port_xmit_data");    lines.append(("port_xmit_data", val))
+                val = read_u64(f"{base}/port_xmit_packets"); lines.append(("port_xmit_packets", val))
+                val = read_u64(f"{base}/port_xmit_discards");lines.append(("xmit_discards", val))
+                val = read_u64(f"{base}/port_xmit_wait");    lines.append(("xmit_wait", val))
+                for idx,(k,v) in enumerate(lines):
+                    if v is not None:
+                        win_tx.addstr(1+idx, 2, f"{k:20s} {v:20d}")
+                if has_colors:
+                    win_tx.attroff(curses.color_pair(10))
+            except curses.error:
+                pass
+            win_tx.noutrefresh()
+        else:
+            # Info (GIDs) view in RX pane; clear TX pane
+            win_rx.erase()
+            try:
+                if has_colors:
+                    win_rx.bkgd(' ', curses.color_pair(11))
+                    win_rx.attron(curses.color_pair(13))
+                win_rx.box()
+                if has_colors:
+                    win_rx.attroff(curses.color_pair(13))
+                    win_rx.attron(curses.color_pair(10))
+                win_rx.addstr(0, 2, " GID Table ")
+                win_rx.addstr(1, 2, "Idx  Type        Ndev              GID")
+                base = f"/sys/class/infiniband/{args.device}/ports/{args.port}"
+                row = 2
+                for i in range(256):
+                    try:
+                        with open(f"{base}/gids/{i}", 'r') as f:
+                            gid = f.read().strip()
+                        if gid.replace(':','') == '0'*32:
+                            continue
+                        try:
+                            with open(f"{base}/gid_attrs/types/{i}", 'r') as f:
+                                gtype = f.read().strip()
+                        except Exception:
+                            gtype = ''
+                        try:
+                            with open(f"{base}/gid_attrs/ndevs/{i}", 'r') as f:
+                                ndev = f.read().strip()
+                        except Exception:
+                            ndev = ''
+                        win_rx.addstr(row, 2, f"{i:3d}  {gtype:10s}  {ndev:16s}  {gid}")
+                        row += 1
+                        if row >= win_rx.getmaxyx()[0]-1:
+                            break
+                if has_colors:
+                    win_rx.attroff(curses.color_pair(10))
+            except curses.error:
+                pass
+            win_rx.noutrefresh()
+
+            try:
+                win_tx.erase()
+                if has_colors:
+                    win_tx.bkgd(' ', curses.color_pair(11))
+                win_tx.noutrefresh()
+            except curses.error:
+                pass
 
         curses.doupdate()
 

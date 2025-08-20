@@ -529,7 +529,7 @@ static int parse_device_list(const char *arg, char names[][128], int maxn)
 
 static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
 {
-    initscr(); cbreak(); noecho(); nodelay(stdscr, TRUE); keypad(stdscr, TRUE); curs_set(0); timeout(0);
+    initscr(); cbreak(); noecho(); nodelay(stdscr, FALSE); keypad(stdscr, TRUE); curs_set(0); timeout((int)(opt->interval * 1000));
     bool use_colors = false;
     if (has_colors()) {
         start_color(); use_colors = true; use_default_colors();
@@ -605,15 +605,13 @@ static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
             if (!md[i].win) md[i].win = newwin(h, w, y, x);
             else { int ch, cw; getmaxyx(md[i].win, ch, cw); if (ch != h || cw != w) { delwin(md[i].win); md[i].win = newwin(h, w, y, x);} }
             if (view == VIEW_PLOT)
-                draw_device_pane(md[i].win, md[i].name, &md[i], opt->units, use_colors, fast_switch);
+                draw_device_pane(md[i].win, md[i].name, &md[i], opt->units, use_colors, false);
             else if (view == VIEW_DATA)
                 draw_device_data_pane(md[i].win, md[i].name, &md[i], use_colors);
             else
                 draw_device_info_pane(md[i].win, md[i].name, use_colors);
         }
         doupdate();
-        double elapsed = now_monotonic() - nowt; double to_sleep = fast_switch ? 0.0 : (opt->interval - elapsed);
-        if (to_sleep > 0) { struct timespec ts; ts.tv_sec = (time_t)to_sleep; ts.tv_nsec = (long)((to_sleep - ts.tv_sec)*1e9); nanosleep(&ts, NULL);}        
         if (opt->duration > 0 && (now_monotonic() - start_time) >= opt->duration) break;
     }
     for (int i=0;i<ndev;++i){ if (md[i].win) delwin(md[i].win); free_counters(&md[i].ctrs);} free(md);
@@ -718,7 +716,7 @@ int main(int argc, char **argv) {
     initscr();
     cbreak();
     noecho();
-    nodelay(stdscr, TRUE);
+    nodelay(stdscr, FALSE);
     keypad(stdscr, TRUE);
     curs_set(0);
     timeout(0);
@@ -756,6 +754,7 @@ int main(int argc, char **argv) {
     }
     raw_tx_data = p_txB; raw_rx_data = p_rxB; raw_tx_pkts = p_txp; raw_rx_pkts = p_rxp;
     double prev_t = now_monotonic();
+    bool first_draw = true;
 
     // history for graph
     enum { HIST_CAP = 4096 };
@@ -944,8 +943,8 @@ int main(int argc, char **argv) {
             wnoutrefresh(win_info);
         } else if (!data_mode) {
             // Draw RX/TX graph panels
-            draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors, fast_switch);
-            draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors, fast_switch);
+            draw_panel_win(win_rx, "RX", rx_Bps, rx_pps, rx_hist, hist_len, opt.units, rate_gbps, use_colors, false);
+            draw_panel_win(win_tx, "TX", tx_Bps, tx_pps, tx_hist, hist_len, opt.units, rate_gbps, use_colors, false);
         } else {
             // Draw raw counters panels
             // RX panel
@@ -1021,6 +1020,7 @@ int main(int argc, char **argv) {
         }
 
         doupdate();
+        if (first_draw) { timeout((int)(opt.interval * 1000)); first_draw = false; }
 
         // sleep remaining time
         double elapsed = now_monotonic() - loop_start;
