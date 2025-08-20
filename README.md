@@ -92,3 +92,9 @@ Arguments:
 ## Credit
 
 This project was written with OpenAI’s Codex in basically exactly one context window — I didn’t write a single line of code. I provided prompts, reviewed outputs, and let the model generate the implementation end-to-end. For the record, I have no experience writing TUI programs and basically no idea where to start — any cleverness here belongs to the tool, not me. Sharing this to be transparent and to give credit where it’s due. It’s interesting times!
+
+## Acknowledgments
+
+Some inspiration for the design and TUI presentation comes from:
+- bmon: https://github.com/tgraf/bmon
+- NVIDIA ib-traffic-monitor: https://github.com/NVIDIA/ib-traffic-monitor
