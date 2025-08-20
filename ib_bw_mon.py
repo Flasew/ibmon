@@ -253,6 +253,7 @@ def draw(screen, args):
 
     while True:
         start_loop = time.perf_counter()
+        fast_switch = False
 
         # Input handling (drain input buffer for reliability)
         while True:
@@ -269,10 +270,12 @@ def draw(screen, args):
                 data_mode = not data_mode
                 if data_mode:
                     info_mode = False
+                fast_switch = True
             elif ch in (ord('i'), ord('I')):
                 info_mode = not info_mode
                 if info_mode:
                     data_mode = False
+                fast_switch = True
 
         if not paused:
             try:
@@ -543,26 +546,22 @@ def draw(screen, args):
                 win_rx.addstr(1, 2, "Idx  Type        Ndev              GID")
                 base = f"/sys/class/infiniband/{args.device}/ports/{args.port}"
                 row = 2
-                for i in range(256):
+                def read_text(p):
                     try:
-                        with open(f"{base}/gids/{i}", 'r') as f:
-                            gid = f.read().strip()
-                        if gid.replace(':','') == '0'*32:
-                            continue
-                        try:
-                            with open(f"{base}/gid_attrs/types/{i}", 'r') as f:
-                                gtype = f.read().strip()
-                        except Exception:
-                            gtype = ''
-                        try:
-                            with open(f"{base}/gid_attrs/ndevs/{i}", 'r') as f:
-                                ndev = f.read().strip()
-                        except Exception:
-                            ndev = ''
-                        win_rx.addstr(row, 2, f"{i:3d}  {gtype:10s}  {ndev:16s}  {gid}")
-                        row += 1
-                        if row >= win_rx.getmaxyx()[0]-1:
-                            break
+                        with open(p, 'r') as f:
+                            return f.read().strip()
+                    except Exception:
+                        return None
+                for i in range(256):
+                    gid = read_text(f"{base}/gids/{i}")
+                    if not gid or gid.replace(':','') == '0'*32:
+                        continue
+                    gtype = read_text(f"{base}/gid_attrs/types/{i}") or ''
+                    ndev = read_text(f"{base}/gid_attrs/ndevs/{i}") or ''
+                    win_rx.addstr(row, 2, f"{i:3d}  {gtype:10s}  {ndev:16s}  {gid}")
+                    row += 1
+                    if row >= win_rx.getmaxyx()[0]-1:
+                        break
                 if has_colors:
                     win_rx.attroff(curses.color_pair(10))
             except curses.error:
@@ -582,7 +581,7 @@ def draw(screen, args):
         # Sleep remaining time to maintain interval
         elapsed = time.perf_counter() - start_loop
         to_sleep = args.interval - elapsed
-        if to_sleep > 0:
+        if (not fast_switch) and to_sleep > 0:
             time.sleep(to_sleep)
 
         if args.duration and args.duration > 0 and (time.perf_counter() - start_time) >= args.duration:
