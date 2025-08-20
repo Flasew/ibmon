@@ -3,8 +3,8 @@
 InfiniBand bandwidth and packet monitor with a fast, curses-based TUI.
 
 Two implementations are provided:
-- `ib_bw_mon` (C, ncurses): high-performance TUI with plotting, raw counters, info pages, and multi-device grid.
-- `ib_bw_mon.py` (Python, curses): lightweight TUI with plotting, CSV logging, and data/info pages for a single device.
+- `ibmon` (C, ncurses): high-performance TUI with plotting, raw counters, info pages, and multi-device grid.
+- `ibmon.py` (Python, curses): lightweight TUI with plotting, CSV logging, and data/info pages for a single device.
 
 ## Features
 
@@ -32,13 +32,13 @@ If your system requires wide curses, use: `make LIBS=-lncursesw`.
 ## Usage (C)
 
 ```
-./ib_bw_mon [-d DEV[,DEV...]] [-p 1] [-i 1] [--units bits|bytes] [--bg black|terminal] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
+./ibmon [-d DEV[,DEV...]] [-p 1] [-i 1] [--units bits|bytes] [--bg black|terminal] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 ## Usage (Python)
 
 ```
-python3 ib_bw_mon.py [-d mlx5_0] [-p 1] [-i 1] [--units bits|bytes] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
+python3 ibmon.py [-d mlx5_0] [-p 1] [-i 1] [--units bits|bytes] [--csv out.csv] [--csv-append] [--csv-headers] [--duration 2]
 ```
 
 Arguments:
@@ -85,6 +85,6 @@ Arguments:
 ## Examples
 
 - Plot with terminal background (2s run):
-  - `./ib_bw_mon -d mlx5_0 --bg terminal --duration 2`
+  - `./ibmon -d mlx5_0 --bg terminal --duration 2`
 - CSV logging:
-  - `./ib_bw_mon -d mlx5_0 --csv out.csv`
+  - `./ibmon -d mlx5_0 --csv out.csv`

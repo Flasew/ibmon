@@ -5,10 +5,10 @@ LIBS ?= -lncurses -lm
 
 .PHONY: all clean
 
-all: ib_bw_mon
+all: ibmon
 
-ib_bw_mon: ib_bw_mon.c
+ib_bw_mon: ibmon.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
 
 clean:
-	rm -f ib_bw_mon
+	rm -f ibmon
