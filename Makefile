@@ -7,7 +7,7 @@ LIBS ?= -lncurses -lm
 
 all: ibmon
 
-ib_bw_mon: ibmon.c
+ibmon: ibmon.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
 
 clean:
