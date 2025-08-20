@@ -307,6 +307,11 @@ static void format_scale_label(double v_disp_per_s, units_t units, char *buf, si
     snprintf(buf, buflen, "%6.2f %s", v, suf);
 }
 
+static void draw_ascii_box(WINDOW *w)
+{
+    wborder(w, '|', '|', '-', '-', '+', '+', '+', '+');
+}
+
 static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, double cur_pps,
                            double *hist, int hist_len, units_t units, double rate_gbps,
                            bool use_colors, bool light)
@@ -318,7 +323,7 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
         wbkgdset(win, COLOR_PAIR(11) | ' ');
         wattron(win, COLOR_PAIR(13));
     }
-    box(win, 0, 0);
+    draw_ascii_box(win);
     if (use_colors) wattroff(win, COLOR_PAIR(13));
     char ratebuf[64], ppsbuf[64];
     human_rate(cur_Bps, units, ratebuf, sizeof(ratebuf));
@@ -397,7 +402,7 @@ static void draw_device_pane(WINDOW *pane, const char *devname, mon_dev_t *md, u
     int ph, pw; getmaxyx(pane, ph, pw);
     werase(pane);
     if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
-    box(pane, 0, 0);
+    draw_ascii_box(pane);
     if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
     mvwprintw(pane, 0, 2, " %s ", devname);
     if (use_colors) wattroff(pane, COLOR_PAIR(10));
@@ -415,12 +420,11 @@ static void draw_device_pane(WINDOW *pane, const char *devname, mon_dev_t *md, u
 
 static void draw_device_data_pane(WINDOW *pane, const char *devname, mon_dev_t *md, bool use_colors)
 {
-    int ph, pw; getmaxyx(pane, ph, pw);
     werase(pane);
     if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
-    box(pane, 0, 0);
+    draw_ascii_box(pane);
     if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
-    mvwprintw(pane, 0, 2, " %s — Raw Counters ", devname);
+    mvwprintw(pane, 0, 2, " %s - Raw Counters ", devname);
     int row = 1;
     uint64_t v;
     if (md->ctrs.rx_data && read_u64_file(md->ctrs.rx_data, &v)) mvwprintw(pane, row++, 2, "port_rcv_data:    %20" PRIu64 " %s", v, md->ctrs.data_is_words ? "(words)" : "");
@@ -447,9 +451,9 @@ static void draw_device_info_pane(WINDOW *pane, const char *devname, bool use_co
     int ph, pw; getmaxyx(pane, ph, pw);
     werase(pane);
     if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
-    box(pane, 0, 0);
+    draw_ascii_box(pane);
     if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
-    mvwprintw(pane, 0, 2, " %s — GIDs ", devname);
+    mvwprintw(pane, 0, 2, " %s - GIDs ", devname);
     mvwprintw(pane, 1, 2, "Idx  Type        Ndev              GID");
     gid_entry_t *list = NULL; int cnt = 0;
     fetch_gid_list(devname, 1, &list, &cnt);
@@ -582,12 +586,12 @@ static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
             }
             prev_t = nowt;
         }
+        // Header (avoid full-screen erase to reduce flicker)
         int maxy = getmaxy(stdscr), maxx = getmaxx(stdscr);
-        // Header
-        erase();
+        mvhline(0, 0, ' ', maxx);
         if (use_colors) attron(COLOR_PAIR(10));
         const char *mode_str = (view==VIEW_PLOT?"PLOT":(view==VIEW_DATA?"DATA":"INFO"));
-        mvprintw(0,2," ibmon — multi-device (%d) [%s] [q:quit u:units p:pause d:data i:info] ", ndev, mode_str);
+        mvprintw(0,2," ibmon - multi-device (%d) [%s] [q:quit u:units p:pause d:data i:info] ", ndev, mode_str);
         if (use_colors) attroff(COLOR_PAIR(10));
         int hdr_h = 1;
         // Grid
@@ -884,10 +888,10 @@ int main(int argc, char **argv) {
         werase(win_hdr);
         if (use_colors) wbkgd(win_hdr, COLOR_PAIR(12));
         if (use_colors) wattron(win_hdr, COLOR_PAIR(13));
-        box(win_hdr, 0, 0);
+        draw_ascii_box(win_hdr);
         if (use_colors) wattroff(win_hdr, COLOR_PAIR(13));
         if (use_colors) wattron(win_hdr, COLOR_PAIR(10));
-        // Title and current time on same line
+        // Title and current time on same line (ASCII only)
         mvwprintw(win_hdr, 0, 2, " InfiniBand Bandwidth Monitor ");
         // Time: MonthName-DD-YYYY HH:MM:SS
         {
