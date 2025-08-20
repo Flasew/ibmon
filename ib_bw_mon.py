@@ -174,9 +174,23 @@ def diff_counters(prev: Tuple[int, int, int, int], cur: Tuple[int, int, int, int
 
 
 def draw(screen, args):
+    # Setup terminal modes for immediate, non-echoed key handling
+    try:
+        curses.raw()
+        curses.noecho()
+    except Exception:
+        pass
     curses.use_default_colors()
     screen.nodelay(True)
-    screen.timeout(0)
+    # Small blocking timeout improves key capture reliability on some terminals
+    try:
+        screen.timeout(max(10, min(200, int(args.interval * 1000 / 2))))
+    except Exception:
+        screen.timeout(50)
+    try:
+        screen.keypad(True)
+    except Exception:
+        pass
     has_colors = curses.has_colors()
     if has_colors:
         curses.start_color()
@@ -238,15 +252,17 @@ def draw(screen, args):
     while True:
         start_loop = time.perf_counter()
 
-        # Input handling
-        ch = screen.getch()
-        if ch != -1:
-            if ch in (ord("q"), ord("Q")):
+        # Input handling (drain input buffer for reliability)
+        while True:
+            ch = screen.getch()
+            if ch == -1:
                 break
-            elif ch in (ord("p"), ord("P")):
+            if ch in (ord('q'), ord('Q')):
+                return
+            elif ch in (ord('p'), ord('P')):
                 paused = not paused
-            elif ch in (ord("u"), ord("U")):
-                args.units = "bytes" if args.units == "bits" else "bits"
+            elif ch in (ord('u'), ord('U')):
+                args.units = 'bytes' if args.units == 'bits' else 'bits'
 
         if not paused:
             try:
@@ -460,7 +476,7 @@ def main():
         description="TUI monitor for InfiniBand bandwidth and packets via sysfs counters",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-d", "--device", required=True, help="InfiniBand device, e.g. mlx5_0")
+    parser.add_argument("-d", "--device", help="InfiniBand device, e.g. mlx5_0. If omitted, picks first ACTIVE device.")
     parser.add_argument("-p", "--port", type=int, default=1, help="Port number")
     parser.add_argument(
         "-i",
@@ -484,6 +500,24 @@ def main():
 
     if args.interval <= 0:
         parser.error("--interval must be > 0")
+
+    # If device not specified, pick first ACTIVE device on port 1
+    if not args.device:
+        base = "/sys/class/infiniband"
+        try:
+            for d in sorted(os.listdir(base)):
+                state_path = os.path.join(base, d, "ports", "1", "state")
+                try:
+                    with open(state_path, "r") as f:
+                        if "ACTIVE" in f.read():
+                            args.device = d
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if not args.device:
+            parser.error("No ACTIVE InfiniBand devices found and no --device specified")
 
     # Make Ctrl-C cleanly exit curses
     signal.signal(signal.SIGINT, signal.SIG_DFL)

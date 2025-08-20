@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <inttypes.h>
+#include <dirent.h>
 
 #define SYSFS_IB_BASE "/sys/class/infiniband"
 
@@ -48,6 +49,19 @@ typedef struct {
     char *type;
     char *ndev;
 } gid_entry_t;
+
+// Multi-device monitoring state
+typedef struct {
+    char name[128];
+    counters_t ctrs;
+    double rate_gbps;
+    uint64_t prev_tx_data, prev_rx_data, prev_tx_pkts, prev_rx_pkts;
+    double tx_Bps, rx_Bps, tx_pps, rx_pps;
+    int hist_len;
+    double rx_hist[4096];
+    double tx_hist[4096];
+    WINDOW *win;
+} mon_dev_t;
 
 typedef enum { UNITS_BITS, UNITS_BYTES } units_t;
 
@@ -378,6 +392,162 @@ static void draw_panel_win(WINDOW *win, const char *title, double cur_Bps, doubl
     wnoutrefresh(win);
 }
 
+static void draw_device_pane(WINDOW *pane, const char *devname, mon_dev_t *md, units_t units, bool use_colors, bool light)
+{
+    int ph, pw; getmaxyx(pane, ph, pw);
+    werase(pane);
+    if (use_colors) { wbkgd(pane, COLOR_PAIR(11)); wattron(pane, COLOR_PAIR(13)); }
+    box(pane, 0, 0);
+    if (use_colors) { wattroff(pane, COLOR_PAIR(13)); wattron(pane, COLOR_PAIR(10)); }
+    mvwprintw(pane, 0, 2, " %s ", devname);
+    if (use_colors) wattroff(pane, COLOR_PAIR(10));
+    int inner_h = ph - 2; if (inner_h < 4) inner_h = 4;
+    int rx_h = inner_h / 2;
+    int tx_h = inner_h - rx_h;
+    WINDOW *sub_rx = derwin(pane, rx_h, pw - 2, 1, 1);
+    WINDOW *sub_tx = derwin(pane, tx_h, pw - 2, 1 + rx_h, 1);
+    draw_panel_win(sub_rx, "RX", md->rx_Bps, md->rx_pps, md->rx_hist, md->hist_len, units, md->rate_gbps, use_colors, light);
+    draw_panel_win(sub_tx, "TX", md->tx_Bps, md->tx_pps, md->tx_hist, md->hist_len, units, md->rate_gbps, use_colors, light);
+    delwin(sub_rx);
+    delwin(sub_tx);
+    wnoutrefresh(pane);
+}
+
+static bool file_read_has(const char *path, const char *needle)
+{
+    char *s = read_str_file(path);
+    if (!s) return false;
+    bool ok = (strstr(s, needle) != NULL);
+    free(s);
+    return ok;
+}
+
+static int enumerate_active_devices(char names[][128], int maxn)
+{
+    DIR *d = opendir(SYSFS_IB_BASE);
+    if (!d) return 0;
+    int count = 0; struct dirent *de;
+    while ((de = readdir(d)) != NULL && count < maxn) {
+        if (de->d_name[0] == '.') continue;
+        char p[512]; snprintf(p, sizeof(p), "%s/%s/ports/1/state", SYSFS_IB_BASE, de->d_name);
+        if (access(p, R_OK) != 0) continue;
+        if (!file_read_has(p, "ACTIVE")) continue;
+        // Copy device name safely into fixed buffer
+        snprintf(names[count], 128, "%.127s", de->d_name);
+        count++;
+    }
+    closedir(d);
+    return count;
+}
+
+static int parse_device_list(const char *arg, char names[][128], int maxn)
+{
+    if (!arg) return 0;
+    int count = 0; const char *p = arg; const char *start = p;
+    while (*p && count < maxn) {
+        if (*p == ',') {
+            int len = (int)(p - start);
+            if (len > 0) {
+                if (len > 127) len = 127;
+                memcpy(names[count], start, (size_t)len);
+                names[count][len] = '\0';
+                count++;
+            }
+            start = p + 1;
+        }
+        p++;
+    }
+    if (start && *start && count < maxn) {
+        int len = (int)strlen(start);
+        if (len > 0) {
+            if (len > 127) len = 127;
+            memcpy(names[count], start, (size_t)len);
+            names[count][len] = '\0';
+            count++;
+        }
+    }
+    return count;
+}
+
+static int run_multi_mode(char devs[][128], int ndev, opts_t *opt)
+{
+    initscr(); cbreak(); noecho(); nodelay(stdscr, TRUE); keypad(stdscr, TRUE); curs_set(0); timeout(0);
+    bool use_colors = false;
+    if (has_colors()) {
+        start_color(); use_colors = true; use_default_colors();
+        int bg = (opt->bg_mode == 1 ? -1 : COLOR_BLACK);
+        int fg_text = (opt->bg_mode == 1 ? -1 : COLOR_WHITE);
+        int fg_border = (opt->bg_mode == 1 ? -1 : COLOR_WHITE);
+        init_pair(1, COLOR_CYAN, bg); init_pair(2, COLOR_RED, bg);
+        init_pair(10, fg_text, bg); init_pair(11, bg, bg); init_pair(12, bg, bg); init_pair(13, fg_border, bg);
+    }
+    mon_dev_t *md = calloc(ndev, sizeof(mon_dev_t));
+    for (int i = 0; i < ndev; ++i) {
+        snprintf(md[i].name, sizeof(md[i].name), "%s", devs[i]);
+        if (!resolve_counters(devs[i], 1, &md[i].ctrs)) continue;
+        md[i].rate_gbps = parse_rate_gbps(md[i].ctrs.rate);
+        read_u64_file(md[i].ctrs.tx_data, &md[i].prev_tx_data);
+        read_u64_file(md[i].ctrs.rx_data, &md[i].prev_rx_data);
+        read_u64_file(md[i].ctrs.tx_pkts, &md[i].prev_tx_pkts);
+        read_u64_file(md[i].ctrs.rx_pkts, &md[i].prev_rx_pkts);
+        md[i].hist_len = 0; md[i].tx_Bps = md[i].rx_Bps = md[i].tx_pps = md[i].rx_pps = 0.0; md[i].win = NULL;
+    }
+    double start_time = now_monotonic();
+    double prev_t = now_monotonic();
+    for (;;) {
+        int ch = getch(); if (ch == 'q' || ch == 'Q') break;
+        bool fast_switch = (ch == 'd' || ch == 'D' || ch == 'i' || ch == 'I');
+        double nowt = now_monotonic(); double dt = nowt - prev_t; if (dt <= 0) dt = 1e-9;
+        if (!fast_switch) {
+            for (int i = 0; i < ndev; ++i) {
+                if (!md[i].ctrs.tx_data) continue;
+                uint64_t c_txB=0,c_rxB=0,c_txp=0,c_rxp=0;
+                if (!read_u64_file(md[i].ctrs.tx_data,&c_txB)) continue;
+                if (!read_u64_file(md[i].ctrs.rx_data,&c_rxB)) continue;
+                if (!read_u64_file(md[i].ctrs.tx_pkts,&c_txp)) continue;
+                if (!read_u64_file(md[i].ctrs.rx_pkts,&c_rxp)) continue;
+                uint64_t d_txB = (c_txB >= md[i].prev_tx_data) ? (c_txB - md[i].prev_tx_data) : (c_txB + (UINT64_MAX - md[i].prev_tx_data) + 1);
+                uint64_t d_rxB = (c_rxB >= md[i].prev_rx_data) ? (c_rxB - md[i].prev_rx_data) : (c_rxB + (UINT64_MAX - md[i].prev_rx_data) + 1);
+                uint64_t d_txp = (c_txp >= md[i].prev_tx_pkts) ? (c_txp - md[i].prev_tx_pkts) : (c_txp + (UINT64_MAX - md[i].prev_tx_pkts) + 1);
+                uint64_t d_rxp = (c_rxp >= md[i].prev_rx_pkts) ? (c_rxp - md[i].prev_rx_pkts) : (c_rxp + (UINT64_MAX - md[i].prev_rx_pkts) + 1);
+                if (md[i].ctrs.data_is_words) { d_txB *= 4; d_rxB *= 4; }
+                md[i].tx_Bps = (double)d_txB / dt; md[i].rx_Bps = (double)d_rxB / dt;
+                md[i].tx_pps = (double)d_txp / dt; md[i].rx_pps = (double)d_rxp / dt;
+                md[i].prev_tx_data = c_txB; md[i].prev_rx_data = c_rxB; md[i].prev_tx_pkts=c_txp; md[i].prev_rx_pkts=c_rxp;
+                if (md[i].hist_len < 4096) { md[i].rx_hist[md[i].hist_len]=md[i].rx_Bps; md[i].tx_hist[md[i].hist_len]=md[i].tx_Bps; md[i].hist_len++; }
+                else { memmove(md[i].rx_hist, md[i].rx_hist+1, sizeof(double)*4095); memmove(md[i].tx_hist, md[i].tx_hist+1, sizeof(double)*4095); md[i].rx_hist[4095]=md[i].rx_Bps; md[i].tx_hist[4095]=md[i].tx_Bps; }
+            }
+            prev_t = nowt;
+        }
+        int maxy = getmaxy(stdscr), maxx = getmaxx(stdscr);
+        // Header
+        erase();
+        if (use_colors) attron(COLOR_PAIR(10));
+        mvprintw(0,2," ibmon — multi-device (%d) [q:quit u:units] ", ndev);
+        if (use_colors) attroff(COLOR_PAIR(10));
+        int hdr_h = 1;
+        // Grid
+        int cols = (int)ceil(sqrt((double)ndev)); if (cols < 1) cols = 1; int rows = (ndev + cols - 1)/cols;
+        int cell_h = (maxy - hdr_h) / rows; if (cell_h < 6) cell_h = 6;
+        int cell_w = (maxx) / cols; if (cell_w < 20) cell_w = 20;
+        for (int i = 0; i < ndev; ++i) {
+            int r = i / cols, c = i % cols;
+            int y = hdr_h + r * cell_h; int h = (r == rows-1) ? (maxy - y) : cell_h;
+            int x = c * cell_w; int w = (c == cols-1) ? (maxx - x) : cell_w;
+            if (!md[i].win) md[i].win = newwin(h, w, y, x);
+            else { int ch, cw; getmaxyx(md[i].win, ch, cw); if (ch != h || cw != w) { delwin(md[i].win); md[i].win = newwin(h, w, y, x);} }
+            draw_device_pane(md[i].win, md[i].name, &md[i], opt->units, use_colors, fast_switch);
+        }
+        doupdate();
+        double elapsed = now_monotonic() - nowt; double to_sleep = fast_switch ? 0.0 : (opt->interval - elapsed);
+        if (to_sleep > 0) { struct timespec ts; ts.tv_sec = (time_t)to_sleep; ts.tv_nsec = (long)((to_sleep - ts.tv_sec)*1e9); nanosleep(&ts, NULL);}        
+        if (opt->duration > 0 && (now_monotonic() - start_time) >= opt->duration) break;
+    }
+    for (int i=0;i<ndev;++i){ if (md[i].win) delwin(md[i].win); free_counters(&md[i].ctrs);} free(md);
+    endwin();
+    return 0;
+}
+
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s -d DEVICE [-p PORT] [-i INTERVAL] [-u bits|bytes] [--csv PATH] [--csv-append] [--csv-headers] [--duration SECONDS]\n"
@@ -429,7 +599,23 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!opt.device) { usage(argv[0]); fprintf(stderr, "--device is required\n"); return 2; }
+    // Multi-device handling: parse list or enumerate ACTIVE devices when -d omitted
+    char dev_names[64][128]; int dev_count = 0;
+    if (opt.device) dev_count = parse_device_list(opt.device, dev_names, 64);
+    if (!opt.device || dev_count == 0) {
+        dev_count = enumerate_active_devices(dev_names, 64);
+    }
+    if (dev_count > 1) {
+        return run_multi_mode(dev_names, dev_count, &opt);
+    }
+    if (!opt.device) {
+        if (dev_count == 1) {
+            opt.device = strdup(dev_names[0]);
+        } else {
+            usage(argv[0]); fprintf(stderr, "No ACTIVE InfiniBand devices found and no -d specified.\n");
+            return 2;
+        }
+    }
     if (opt.port <= 0) { fprintf(stderr, "--port must be > 0\n"); return 2; }
     if (opt.interval <= 0) { fprintf(stderr, "--interval must be > 0\n"); return 2; }
 
